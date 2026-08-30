@@ -89,6 +89,11 @@ class ReconcileStats:
     updated: int = 0
     unchanged: int = 0
     removed: int = 0
+    # person_ids behind the counts above, so callers (e.g. startup
+    # reconciliation wiring the semantic index) can apply the same delta
+    # incrementally instead of a full rebuild.
+    changed_person_ids: frozenset[str] = frozenset()
+    removed_person_ids: frozenset[str] = frozenset()
 
 
 def _row_params(person: Person, *, file_path: str, content_hash: str, updated_at: str) -> dict:
@@ -221,6 +226,7 @@ class SqliteIndex:
         }
         now = dt.datetime.now(dt.UTC).isoformat()
         seen: set[str] = set()
+        changed_ids: set[str] = set()
         inserted = updated = unchanged = 0
         for person_id, person in scan_result.valid.items():
             seen.add(person_id)
@@ -229,13 +235,22 @@ class SqliteIndex:
             if person_id not in existing_hashes:
                 self.upsert_person(person, file_path=str(path), content_hash=content_hash)
                 inserted += 1
+                changed_ids.add(person_id)
             elif existing_hashes[person_id] != content_hash:
                 self.upsert_person(person, file_path=str(path), content_hash=content_hash)
                 updated += 1
+                changed_ids.add(person_id)
             else:
                 unchanged += 1
         stale_ids = set(existing_hashes) - seen
         for person_id in stale_ids:
             self.remove_person(person_id)
         self.set_meta("last_reconciliation_at", now)
-        return ReconcileStats(inserted=inserted, updated=updated, unchanged=unchanged, removed=len(stale_ids))
+        return ReconcileStats(
+            inserted=inserted,
+            updated=updated,
+            unchanged=unchanged,
+            removed=len(stale_ids),
+            changed_person_ids=frozenset(changed_ids),
+            removed_person_ids=frozenset(stale_ids),
+        )

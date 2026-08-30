@@ -12,7 +12,8 @@ dependencies = [
     "fastembed>=0.8.0",
     "numpy>=2.0",
     "typer>=0.15",
-    "pyyaml>=6.0",
+    "starlette>=0.38",
+    "uvicorn>=0.30",
     "tzdata; sys_platform == 'win32'",
 ]
 

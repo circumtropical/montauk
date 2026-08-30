@@ -1,0 +1,42 @@
+# Montauk deployment configuration (spec section 31).
+#
+# Copy this file (e.g. to config.yaml) and adjust for your deployment.
+# This file holds non-secret settings only -- agent credentials are
+# managed separately via `montauk agents create` and never belong here.
+
+# Where the canonical Markdown data (people/, archive/) and derived
+# indexes live. Keep this outside any public source repository.
+data_dir: /var/lib/montauk
+
+transport:
+  # "stdio" for a single local agent host (e.g. a desktop assistant
+  # launching `montauk serve` directly); "remote" for authenticated
+  # HTTPS access by multiple agents.
+  mode: stdio
+  # Only used when mode is "remote". Binding 0.0.0.0 requires auth to be
+  # configured (montauk refuses to start otherwise) -- put a TLS-
+  # terminating reverse proxy in front for real remote deployments.
+  host: 127.0.0.1
+  port: 8765
+
+git:
+  enabled: true
+  # 24-hour local time; at most one automatic commit is made per day,
+  # only if canonical data actually changed. Never auto-pushes.
+  daily_snapshot_time: "03:00"
+
+search:
+  semantic_enabled: true
+  max_candidates: 5
+  # Calibrated for the default local embedding model (see `embedding`
+  # below); if you change the model, recalibrate this against a few
+  # known related/unrelated text pairs before trusting the default.
+  similarity_threshold: 0.35
+
+embedding:
+  provider: local
+  model: sentence-transformers/all-MiniLM-L6-v2
+
+logging:
+  level: INFO
+  retention_days: 30

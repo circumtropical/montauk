@@ -157,6 +157,18 @@ class TestIncrementalReconcile:
         assert stats.unchanged == 0
         assert index.get_row("homer-simpson")["summary"] == "Updated summary."
 
+    def test_stats_expose_changed_and_removed_person_ids(self, tmp_path):
+        store = _store(tmp_path)
+        store.write_person(_homer())
+        index = SqliteIndex(tmp_path / "data" / "index" / "relationships.sqlite")
+        index.rebuild_from_scan(store, scan_people_directory(store))
+
+        store.write_person(_no_year_birthday_person())  # new: ned-flanders
+        stats = index.reconcile(store, scan_people_directory(store))
+
+        assert stats.changed_person_ids == frozenset({"ned-flanders"})
+        assert stats.removed_person_ids == frozenset()
+
     def test_archived_person_is_removed_from_index(self, tmp_path):
         store = _store(tmp_path)
         store.write_person(_homer())
