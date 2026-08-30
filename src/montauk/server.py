@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from mcp.server.mcpserver import MCPServer
 
+from .tools_core import MontaukContext, register_core_tools
+
 SERVER_INSTRUCTIONS = """\
 Montauk is the user's persistent relationship memory about people they know.
 
@@ -39,8 +41,13 @@ BOUNDARIES
 """
 
 
-def create_server(*, name: str = "montauk") -> MCPServer:
-    """Construct the bare Montauk MCPServer with its server-level
-    instructions. Tool/resource registration is added by callers in
-    later steps once the write queue and stores it depends on exist."""
-    return MCPServer(name=name, instructions=SERVER_INSTRUCTIONS)
+def create_server(*, name: str = "montauk", context: MontaukContext | None = None) -> MCPServer:
+    """Construct the Montauk MCPServer with its server-level instructions.
+    When `context` (store/index/write_queue) is given, the core
+    identity/read/write tools are registered against it; further tool
+    groups (batch, birthdays/cadence/archive/health, search, auth) are
+    layered on by their own registration functions in later steps."""
+    server = MCPServer(name=name, instructions=SERVER_INSTRUCTIONS)
+    if context is not None:
+        register_core_tools(server, context)
+    return server
