@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from mcp.server.mcpserver import MCPServer
 
-from .tools_core import MontaukContext, register_core_tools
+from .tools_core import MontaukContext, register_batch_tools, register_core_tools
 
 SERVER_INSTRUCTIONS = """\
 Montauk is the user's persistent relationship memory about people they know.
@@ -50,4 +50,5 @@ def create_server(*, name: str = "montauk", context: MontaukContext | None = Non
     server = MCPServer(name=name, instructions=SERVER_INSTRUCTIONS)
     if context is not None:
         register_core_tools(server, context)
+        register_batch_tools(server, context)
     return server

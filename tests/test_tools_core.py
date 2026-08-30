@@ -66,7 +66,7 @@ def _local_id_num(local_id: str) -> int:
 
 class TestToolRegistration:
     @pytest.mark.asyncio
-    async def test_fourteen_core_tools_registered(self, tmp_path):
+    async def test_core_and_batch_tools_registered(self, tmp_path):
         async with running_session(tmp_path) as (session, _ctx):
             tools = (await session.list_tools()).tools
             names = {t.name for t in tools}
@@ -85,6 +85,7 @@ class TestToolRegistration:
                 "update_summary",
                 "set_birthday",
                 "set_contact_cadence",
+                "update_person_batch",
             }
 
     @pytest.mark.asyncio
@@ -317,6 +318,112 @@ class TestSearchPeople:
             await call(session, "create_person", name="Homer Simpson")
             result = await call(session, "search_people", query="nonexistent")
             assert result["candidates"] == []
+
+
+class TestUpdatePersonBatch:
+    @pytest.mark.asyncio
+    async def test_batch_applies_multiple_operation_kinds_atomically(self, tmp_path):
+        async with running_session(tmp_path) as (session, _ctx):
+            await call(session, "create_person", name="Homer Simpson")
+
+            result = await call(
+                session,
+                "update_person_batch",
+                person_id="homer-simpson",
+                operations=[
+                    {"op": "add_fact", "category": "Family", "text": "Married to Marge."},
+                    {"op": "record_interaction", "date": "2026-08-20", "summary": "Lunch at Moe's."},
+                    {"op": "update_summary", "summary": "Neighbor and old friend."},
+                    {"op": "set_birthday", "birthday": "1956-05-12"},
+                    {"op": "set_contact_cadence", "desired_contact_cadence_days": 14},
+                    {"op": "update_contact_details", "emails": ["homer@example.com"]},
+                ],
+            )
+            assert set(result["changed_ids"]) == {"fact-1", "int-1"}
+
+            person = await call(session, "get_person", person_id="homer-simpson")
+            assert person["summary"] == "Neighbor and old friend."
+            assert person["birthday"] == "1956-05-12"
+            assert person["desired_contact_cadence_days"] == 14
+            assert person["contact"]["emails"] == ["homer@example.com"]
+
+            facts = await call(session, "get_facts", person_id="homer-simpson")
+            assert [f["text"] for f in facts] == ["Married to Marge."]
+            interactions = await call(session, "get_interactions", person_id="homer-simpson")
+            assert [i["summary"] for i in interactions] == ["Lunch at Moe's."]
+
+    @pytest.mark.asyncio
+    async def test_batch_can_add_update_and_remove_facts_together(self, tmp_path):
+        async with running_session(tmp_path) as (session, _ctx):
+            await call(session, "create_person", name="Homer Simpson")
+            await call(session, "add_fact", person_id="homer-simpson", category="Family", text="Keep me.")
+            await call(session, "add_fact", person_id="homer-simpson", category="Interests", text="Remove me.")
+
+            result = await call(
+                session,
+                "update_person_batch",
+                person_id="homer-simpson",
+                operations=[
+                    {"op": "update_fact", "fact_id": "fact-1", "text": "Keep me, updated."},
+                    {"op": "remove_fact", "fact_id": "fact-2"},
+                    {"op": "add_fact", "category": "Life Events", "text": "Brand new fact."},
+                ],
+            )
+            assert set(result["changed_ids"]) == {"fact-1", "fact-2", "fact-3"}
+
+            facts = await call(session, "get_facts", person_id="homer-simpson")
+            texts = {f["id"]: f["text"] for f in facts}
+            assert texts == {"fact-1": "Keep me, updated.", "fact-3": "Brand new fact."}
+
+    @pytest.mark.asyncio
+    async def test_one_invalid_operation_rolls_back_the_whole_batch(self, tmp_path):
+        async with running_session(tmp_path) as (session, ctx):
+            await call(session, "create_person", name="Homer Simpson")
+            before = ctx.store.person_path("homer-simpson").read_text()
+
+            text = await call_expecting_error(
+                session,
+                "update_person_batch",
+                person_id="homer-simpson",
+                operations=[
+                    {"op": "add_fact", "category": "Family", "text": "This would have been valid."},
+                    {"op": "update_fact", "fact_id": "fact-99", "text": "This one does not exist."},
+                ],
+            )
+            assert "NOT_FOUND" in text
+
+            after = ctx.store.person_path("homer-simpson").read_text()
+            assert before == after  # zero changes applied, not even the valid one
+            facts = await call(session, "get_facts", person_id="homer-simpson")
+            assert facts == []
+
+    @pytest.mark.asyncio
+    async def test_invalid_discriminator_is_rejected_by_schema(self, tmp_path):
+        async with running_session(tmp_path) as (session, _ctx):
+            await call(session, "create_person", name="Homer Simpson")
+            result = await session.call_tool(
+                "update_person_batch",
+                {"person_id": "homer-simpson", "operations": [{"op": "delete_everything"}]},
+            )
+            assert result.is_error
+
+    @pytest.mark.asyncio
+    async def test_batch_is_scoped_to_one_person_only(self, tmp_path):
+        async with running_session(tmp_path) as (session, _ctx):
+            await call(session, "create_person", name="Homer Simpson")
+            await call(session, "create_person", name="Marge Simpson")
+
+            await call(
+                session,
+                "update_person_batch",
+                person_id="homer-simpson",
+                operations=[{"op": "update_summary", "summary": "Only Homer changes."}],
+            )
+
+            homer = await call(session, "get_person", person_id="homer-simpson")
+            marge = await call(session, "get_person", person_id="marge-simpson")
+            assert homer["summary"] == "Only Homer changes."
+            assert marge["summary"] is None
 
 
 class TestConcurrentWrites:

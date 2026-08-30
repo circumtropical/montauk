@@ -22,7 +22,22 @@ from .markdown_store import MarkdownStore, PersonNotFoundError, person_to_markdo
 from .models import ContactInfo, Fact, Interaction, Person, Source
 from .schema import CATEGORIES
 from .sqlite_index import SqliteIndex, compute_content_hash
-from .tool_types import IndexUpdateStatus, PersonCandidate, PersonCore, SearchResult, WriteResult
+from .tool_types import (
+    AddFactOp,
+    BatchOperation,
+    IndexUpdateStatus,
+    PersonCandidate,
+    PersonCore,
+    RecordInteractionOp,
+    RemoveFactOp,
+    SearchResult,
+    SetBirthdayOp,
+    SetContactCadenceOp,
+    UpdateContactDetailsOp,
+    UpdateFactOp,
+    UpdateSummaryOp,
+    WriteResult,
+)
 from .write_queue import WriteQueue
 
 logger = logging.getLogger(__name__)
@@ -83,6 +98,130 @@ def _replace_field(person: Person, **updates: object) -> Person:
         return Person(**{**person.model_dump(), **updates})
     except PydanticValidationError as exc:
         raise MontaukValidationError(str(exc)) from exc
+
+
+def _apply_batch_op(
+    person: Person,
+    operation: BatchOperation,
+    *,
+    seen_fact_ids: set[str],
+    seen_interaction_ids: set[str],
+) -> tuple[Person, list[str]]:
+    """Apply one batch operation to `person`, returning the new Person and
+    the local IDs it changed. Raises immediately (NotFoundError /
+    MontaukValidationError) on any invalid operation, before any write
+    happens -- update_person_batch relies on this to validate the whole
+    batch before touching disk.
+
+    `seen_fact_ids`/`seen_interaction_ids` track every local ID ever
+    allocated in this batch (seeded from the person's state before the
+    batch started) and only ever grow, even across a remove_fact within
+    the same batch -- otherwise a remove followed by an add later in the
+    same batch could reissue the just-freed ID, which ids.py's
+    monotonic-allocation invariant explicitly rules out.
+    """
+    if isinstance(operation, AddFactOp):
+        fact_id = next_fact_id(seen_fact_ids)
+        seen_fact_ids.add(fact_id)
+        try:
+            new_fact = Fact(
+                id=fact_id,
+                category=operation.category,
+                text=operation.text,
+                date=operation.date,
+                confidence=operation.confidence,
+                related_person_id=operation.related_person_id,
+                sources=operation.sources,
+            )
+        except PydanticValidationError as exc:
+            raise MontaukValidationError(str(exc)) from exc
+        return _replace_field(person, facts=[*person.facts, new_fact]), [fact_id]
+
+    if isinstance(operation, UpdateFactOp):
+        existing = person.get_fact(operation.fact_id)
+        if existing is None:
+            raise NotFoundError(f"fact {operation.fact_id!r} not found on person {person.id!r}")
+        field_updates = {k: v for k, v in operation.model_dump(exclude={"op", "fact_id"}).items() if v is not None}
+        try:
+            new_fact = Fact(**{**existing.model_dump(), **field_updates})
+        except PydanticValidationError as exc:
+            raise MontaukValidationError(str(exc)) from exc
+        new_facts = [new_fact if f.id == operation.fact_id else f for f in person.facts]
+        return _replace_field(person, facts=new_facts), [operation.fact_id]
+
+    if isinstance(operation, RemoveFactOp):
+        if person.get_fact(operation.fact_id) is None:
+            raise NotFoundError(f"fact {operation.fact_id!r} not found on person {person.id!r}")
+        remaining = [f for f in person.facts if f.id != operation.fact_id]
+        return _replace_field(person, facts=remaining), [operation.fact_id]
+
+    if isinstance(operation, RecordInteractionOp):
+        interaction_id = next_interaction_id(seen_interaction_ids)
+        seen_interaction_ids.add(interaction_id)
+        try:
+            new_interaction = Interaction(
+                id=interaction_id,
+                date=operation.date,
+                channel=operation.channel,
+                connection_level=operation.connection_level,
+                summary=operation.summary,
+                sources=operation.sources,
+            )
+        except PydanticValidationError as exc:
+            raise MontaukValidationError(str(exc)) from exc
+        return _replace_field(person, interactions=[*person.interactions, new_interaction]), [interaction_id]
+
+    if isinstance(operation, UpdateContactDetailsOp):
+        contact_updates = {k: v for k, v in operation.model_dump(exclude={"op"}).items() if v is not None}
+        try:
+            new_contact = ContactInfo(**{**person.contact.model_dump(), **contact_updates})
+        except PydanticValidationError as exc:
+            raise MontaukValidationError(str(exc)) from exc
+        return _replace_field(person, contact=new_contact), []
+
+    if isinstance(operation, UpdateSummaryOp):
+        return _replace_field(person, summary=operation.summary), []
+
+    if isinstance(operation, SetBirthdayOp):
+        return _replace_field(person, birthday=operation.birthday), []
+
+    if isinstance(operation, SetContactCadenceOp):
+        return _replace_field(
+            person, desired_contact_cadence_days=operation.desired_contact_cadence_days
+        ), []
+
+    raise AssertionError(f"unhandled batch operation type: {operation!r}")  # pragma: no cover
+
+
+def register_batch_tools(server: MCPServer, ctx: MontaukContext) -> None:
+    store, write_queue = ctx.store, ctx.write_queue
+
+    @server.tool(
+        description=(
+            "Atomically apply multiple related changes to exactly one known person_id in a single "
+            "call: any mix of add_fact, update_fact, remove_fact, record_interaction, "
+            "update_contact_details, update_summary, set_birthday, and set_contact_cadence "
+            "operations. The entire batch is validated before any change is written -- if any "
+            "operation is invalid, none of them are applied. Prefer this over separate tool calls "
+            "when one interaction or source event produces several related updates for one person."
+        )
+    )
+    async def update_person_batch(person_id: str, operations: list[BatchOperation]) -> WriteResult:
+        def op_fn() -> WriteResult:
+            person = _load_person_or_error(store, person_id)
+            working = person
+            seen_fact_ids = set(person.fact_ids())
+            seen_interaction_ids = set(person.interaction_ids())
+            changed_ids: list[str] = []
+            for operation in operations:
+                working, ids = _apply_batch_op(
+                    working, operation, seen_fact_ids=seen_fact_ids, seen_interaction_ids=seen_interaction_ids
+                )
+                changed_ids.extend(ids)
+            status = _write_and_index(ctx, working)
+            return WriteResult(person_id=person_id, changed_ids=changed_ids, index_update_status=status)
+
+        return await write_queue.submit(op_fn)
 
 
 def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
