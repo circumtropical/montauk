@@ -114,6 +114,59 @@ class SetContactCadenceOp(BaseModel):
     desired_contact_cadence_days: int | None = None
 
 
+class UpcomingBirthday(BaseModel):
+    person_id: str
+    name: str
+    birthday: str
+    next_occurrence: str
+    days_until: int
+
+
+class OverdueContact(BaseModel):
+    person_id: str
+    name: str
+    desired_contact_cadence_days: int
+    last_interaction_at: str | None = None
+    days_since_last_interaction: int | None = None
+    status: Literal["overdue", "never_contacted"]
+
+
+class ArchiveResult(BaseModel):
+    person_id: str
+    status: Literal["archived", "restored"] = "archived"
+
+
+class ArchivedPersonSummary(BaseModel):
+    person_id: str
+    name: str
+
+
+class ValidationIssueOut(BaseModel):
+    person_id: str | None
+    file_path: str
+    error_type: str
+    severity: Literal["error", "warning"]
+    message: str
+
+
+class ValidationReportSummary(BaseModel):
+    scanned_at: str
+    healthy: bool
+    valid_person_count: int
+    error_count: int
+    warning_count: int
+    issues: list[ValidationIssueOut] = Field(default_factory=list)
+
+
+class HealthStatus(BaseModel):
+    healthy: bool
+    valid_person_count: int
+    error_count: int
+    warning_count: int
+    last_scanned_at: str | None = None
+    last_reconciliation_at: str | None = None
+
+
 BatchOperation = Annotated[
     Union[
         AddFactOp,
