@@ -21,6 +21,7 @@ from .ids import next_fact_id, next_interaction_id, next_person_id
 from .markdown_store import MarkdownStore, PersonNotFoundError, person_to_markdown
 from .models import ContactInfo, Fact, Interaction, Person, Source
 from .schema import CATEGORIES
+from .semantic_index import SemanticIndex
 from .sqlite_index import SqliteIndex, compute_content_hash
 from .tool_types import (
     AddFactOp,
@@ -48,6 +49,18 @@ class MontaukContext:
     store: MarkdownStore
     sqlite_index: SqliteIndex
     write_queue: WriteQueue
+    # Semantic search is an optional enhancement layer (spec section 31's
+    # search.semantic_enabled config flag): None means exact/substring
+    # matching only, which is what every pre-existing test still exercises
+    # without paying to construct an embedding model.
+    semantic_index: SemanticIndex | None = None
+    max_candidates: int = 5
+    # Empirically calibrated for the default local model (all-MiniLM-L6-v2),
+    # not copied from the spec's illustrative config.example.yaml value: for
+    # this model, clearly-related short-text pairs typically score
+    # ~0.45-0.75 cosine similarity while unrelated pairs score ~-0.1-0.05, so
+    # 0.55 (the spec's example) silently dropped genuinely relevant matches.
+    similarity_threshold: float = 0.35
 
 
 def _load_person_or_error(store: MarkdownStore, person_id: str) -> Person:
@@ -83,6 +96,8 @@ def _write_and_index(ctx: MontaukContext, person: Person) -> IndexUpdateStatus:
     try:
         path = ctx.store.person_path(person.id)
         ctx.sqlite_index.upsert_person(person, file_path=str(path), content_hash=compute_content_hash(path))
+        if ctx.semantic_index is not None:
+            ctx.semantic_index.upsert_person(person)
         return "ok"
     except Exception:
         logger.exception("failed to update derived index for person %r", person.id)
@@ -229,19 +244,19 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
 
     @server.tool(
         description=(
-            "Search active relationship memory using a name, alias, employer, location, or other "
-            "remembered detail. Accepts vague identifying details, not just exact names. Returns "
-            "ranked candidates with match_evidence explaining why each matched. Multiple candidates "
-            "are expected when identity is ambiguous -- do not guess; ask the user to clarify rather "
-            "than picking one. Phase 1 matching is exact/substring only (semantic recall of vaguer "
-            "descriptions is added in a later step)."
+            "Search active relationship memory using a name, alias, employer, location, event, date, "
+            "or other remembered detail -- including vague identifying descriptions, not just exact "
+            "names (e.g. 'the robotics guy I met at an MIT mixer about a year ago'). Returns ranked "
+            "candidates with match_evidence explaining why each matched. Multiple candidates are "
+            "expected when identity is ambiguous -- do not guess; ask the user to clarify rather than "
+            "picking one."
         )
     )
     async def search_people(query: str) -> SearchResult:
         needle = query.strip().lower()
         if not needle:
             return SearchResult(candidates=[])
-        candidates: list[PersonCandidate] = []
+        candidates: dict[str, PersonCandidate] = {}
         for row in sqlite_index.list_all():
             aliases: list[str] = json.loads(row["aliases_json"])
             summary = row["summary"]
@@ -258,12 +273,31 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
             if row["location"] and needle in row["location"].lower():
                 evidence.append(f"location matches {query!r}")
             if evidence:
-                candidates.append(
-                    PersonCandidate(
-                        person_id=row["person_id"], name=row["name"], summary=summary, match_evidence=evidence
-                    )
+                candidates[row["person_id"]] = PersonCandidate(
+                    person_id=row["person_id"], name=row["name"], summary=summary, match_evidence=evidence
                 )
-        return SearchResult(candidates=candidates)
+
+        if ctx.semantic_index is not None:
+            matches = ctx.semantic_index.search(
+                query, limit=ctx.max_candidates, similarity_threshold=ctx.similarity_threshold
+            )
+            for match in matches:
+                row = sqlite_index.get_row(match.person_id)
+                if row is None:
+                    continue  # stale chunk for an archived/removed person; the next write reconciles it
+                snippet = match.text if len(match.text) <= 140 else f"{match.text[:137]}..."
+                evidence_line = f"semantic match ({match.chunk_type}, score {match.score:.2f}): {snippet!r}"
+                if match.person_id in candidates:
+                    candidates[match.person_id].match_evidence.append(evidence_line)
+                else:
+                    candidates[match.person_id] = PersonCandidate(
+                        person_id=match.person_id,
+                        name=row["name"],
+                        summary=row["summary"],
+                        match_evidence=[evidence_line],
+                    )
+
+        return SearchResult(candidates=list(candidates.values())[: ctx.max_candidates])
 
     @server.tool(
         description=(

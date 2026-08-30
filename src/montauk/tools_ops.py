@@ -139,6 +139,8 @@ def register_ops_tools(server: MCPServer, ctx: MontaukContext) -> None:
                 raise NotFoundError(f"person {person_id!r} not found")
             store.archive_person(person_id)
             sqlite_index.remove_person(person_id)
+            if ctx.semantic_index is not None:
+                ctx.semantic_index.remove_person(person_id)
             return ArchiveResult(person_id=person_id, status="archived")
 
         return await write_queue.submit(op)

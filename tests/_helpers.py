@@ -9,27 +9,34 @@ from pathlib import Path
 from mcp import ClientSession
 from mcp.client._memory import InMemoryTransport
 
+from montauk.embeddings.base import EmbeddingProvider
 from montauk.markdown_store import MarkdownStore
+from montauk.semantic_index import SemanticIndex
 from montauk.server import create_server
 from montauk.sqlite_index import SqliteIndex
 from montauk.tools_core import MontaukContext
 from montauk.write_queue import WriteQueue
 
 
-def build_context(tmp_path: Path) -> MontaukContext:
+def build_context(tmp_path: Path, *, embedding_provider: EmbeddingProvider | None = None) -> MontaukContext:
     data_dir = tmp_path / "data"
     store = MarkdownStore(data_dir)
     sqlite_index = SqliteIndex(data_dir / "index" / "relationships.sqlite")
     write_queue = WriteQueue(data_dir)
-    return MontaukContext(store=store, sqlite_index=sqlite_index, write_queue=write_queue)
+    semantic_index = None
+    if embedding_provider is not None:
+        semantic_index = SemanticIndex(data_dir / "index" / "vectors", embedding_provider)
+    return MontaukContext(
+        store=store, sqlite_index=sqlite_index, write_queue=write_queue, semantic_index=semantic_index
+    )
 
 
 @asynccontextmanager
-async def running_session(tmp_path: Path):
+async def running_session(tmp_path: Path, *, embedding_provider: EmbeddingProvider | None = None):
     """A real MCP client<->server session over an in-memory transport, so
     tool calls go through full protocol dispatch (schema validation,
     ToolError -> is_error conversion) rather than calling handlers directly."""
-    ctx = build_context(tmp_path)
+    ctx = build_context(tmp_path, embedding_provider=embedding_provider)
     server = create_server(context=ctx)
     async with InMemoryTransport(server) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
