@@ -1,0 +1,27 @@
+# Deployment data — never commit real relationship data, indexes, or credentials.
+# Keep this as a single wholesale-ignore line; do not add granular allowlist
+# exceptions under data/ (e.g. "!data/config/**"), since that risks
+# accidentally un-ignoring data/auth/credentials.sqlite.
+data/
+
+# Secrets
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# uv
+uv.lock.tmp
+
+# OS
+.DS_Store
