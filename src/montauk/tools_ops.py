@@ -7,7 +7,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 
 from .dates import Birthday
 from .errors import ArchivedError, MontaukValidationError, NotFoundError
@@ -22,7 +22,7 @@ from .tool_types import (
     ValidationIssueOut,
     ValidationReportSummary,
 )
-from .tools_core import MontaukContext
+from .tools_core import MontaukContext, _authorize_write
 
 
 def _today(as_of: str | None) -> dt.date:
@@ -131,7 +131,9 @@ def register_ops_tools(server: MCPServer, ctx: MontaukContext) -> None:
             "and reconcile) -- this is not privacy erasure, and Git history still retains the record."
         )
     )
-    async def archive_person(person_id: str) -> ArchiveResult:
+    async def archive_person(person_id: str, mcp_ctx: Context) -> ArchiveResult:
+        _authorize_write(ctx, mcp_ctx)
+
         def op() -> ArchiveResult:
             if not store.exists(person_id):
                 if store.is_archived(person_id):

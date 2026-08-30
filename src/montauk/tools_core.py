@@ -13,9 +13,10 @@ import json
 import logging
 from dataclasses import dataclass
 
-from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver import Context, MCPServer
 from pydantic import ValidationError as PydanticValidationError
 
+from .auth import AgentIdentity, CredentialStore, resolve_http_identity, require_write
 from .errors import ArchivedError, MontaukValidationError, NotFoundError
 from .ids import next_fact_id, next_interaction_id, next_person_id
 from .markdown_store import MarkdownStore, PersonNotFoundError, person_to_markdown
@@ -54,6 +55,15 @@ class MontaukContext:
     # matching only, which is what every pre-existing test still exercises
     # without paying to construct an embedding model.
     semantic_index: SemanticIndex | None = None
+    # Auth is likewise opt-in (spec section 30): credential_store=None
+    # means enforcement is off entirely (e.g. a bare local/trusted-user
+    # deployment, or the ~200 pre-auth tests). When set, every mutation
+    # tool requires a resolved read_write identity -- from the HTTP
+    # request's Authorization header per call, or from stdio_identity
+    # (resolved once at process startup from an env var) when there is
+    # no per-request header at all (stdio has exactly one client).
+    credential_store: CredentialStore | None = None
+    stdio_identity: AgentIdentity | None = None
     max_candidates: int = 5
     # Empirically calibrated for the default local model (all-MiniLM-L6-v2),
     # not copied from the spec's illustrative config.example.yaml value: for
@@ -102,6 +112,16 @@ def _write_and_index(ctx: MontaukContext, person: Person) -> IndexUpdateStatus:
     except Exception:
         logger.exception("failed to update derived index for person %r", person.id)
         return "degraded"
+
+
+def _authorize_write(ctx: MontaukContext, mcp_ctx: Context) -> None:
+    """No-op when auth isn't wired at all; otherwise resolves the calling
+    agent's identity for this transport and requires read_write."""
+    if ctx.credential_store is None:
+        return
+    headers = mcp_ctx.headers
+    identity = resolve_http_identity(ctx.credential_store, headers) if headers is not None else ctx.stdio_identity
+    require_write(identity)
 
 
 def _replace_field(person: Person, **updates: object) -> Person:
@@ -221,7 +241,11 @@ def register_batch_tools(server: MCPServer, ctx: MontaukContext) -> None:
             "when one interaction or source event produces several related updates for one person."
         )
     )
-    async def update_person_batch(person_id: str, operations: list[BatchOperation]) -> WriteResult:
+    async def update_person_batch(
+        person_id: str, operations: list[BatchOperation], mcp_ctx: Context
+    ) -> WriteResult:
+        _authorize_write(ctx, mcp_ctx)
+
         def op_fn() -> WriteResult:
             person = _load_person_or_error(store, person_id)
             working = person
@@ -357,6 +381,7 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
     )
     async def create_person(
         name: str,
+        mcp_ctx: Context,
         aliases: list[str] | None = None,
         birthday: str | None = None,
         location: str | None = None,
@@ -365,6 +390,8 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
         desired_contact_cadence_days: int | None = None,
         summary: str | None = None,
     ) -> WriteResult:
+        _authorize_write(ctx, mcp_ctx)
+
         def op() -> WriteResult:
             existing_ids = set(store.list_person_ids()) | set(store.list_archived_person_ids())
             person_id = next_person_id(name, existing_ids)
@@ -399,11 +426,14 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
         person_id: str,
         category: str,
         text: str,
+        mcp_ctx: Context,
         date: str | None = None,
         confidence: str = "high",
         related_person_id: str | None = None,
         sources: list[Source] | None = None,
     ) -> WriteResult:
+        _authorize_write(ctx, mcp_ctx)
+
         def op() -> WriteResult:
             person = _load_person_or_error(store, person_id)
             fact_id = next_fact_id(person.fact_ids())
@@ -435,12 +465,15 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
     async def update_fact(
         person_id: str,
         fact_id: str,
+        mcp_ctx: Context,
         text: str | None = None,
         category: str | None = None,
         date: str | None = None,
         confidence: str | None = None,
         related_person_id: str | None = None,
     ) -> WriteResult:
+        _authorize_write(ctx, mcp_ctx)
+
         def op() -> WriteResult:
             person = _load_person_or_error(store, person_id)
             existing = person.get_fact(fact_id)
@@ -475,7 +508,9 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
             "preserves the record of the change."
         )
     )
-    async def remove_fact(person_id: str, fact_id: str) -> WriteResult:
+    async def remove_fact(person_id: str, fact_id: str, mcp_ctx: Context) -> WriteResult:
+        _authorize_write(ctx, mcp_ctx)
+
         def op() -> WriteResult:
             person = _load_person_or_error(store, person_id)
             if person.get_fact(fact_id) is None:
@@ -496,11 +531,14 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
     async def record_interaction(
         person_id: str,
         date: str,
+        mcp_ctx: Context,
         channel: str | None = None,
         connection_level: int | None = None,
         summary: str | None = None,
         sources: list[Source] | None = None,
     ) -> WriteResult:
+        _authorize_write(ctx, mcp_ctx)
+
         def op() -> WriteResult:
             person = _load_person_or_error(store, person_id)
             interaction_id = next_interaction_id(person.interaction_ids())
@@ -531,11 +569,14 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
     )
     async def update_contact_details(
         person_id: str,
+        mcp_ctx: Context,
         emails: list[str] | None = None,
         phones: list[str] | None = None,
         address: str | None = None,
         messaging: dict[str, str] | None = None,
     ) -> WriteResult:
+        _authorize_write(ctx, mcp_ctx)
+
         def op() -> WriteResult:
             person = _load_person_or_error(store, person_id)
             contact_updates = {
@@ -559,7 +600,9 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
         return await write_queue.submit(op)
 
     @server.tool(description="Replace the short identifying summary for a known person_id.")
-    async def update_summary(person_id: str, summary: str) -> WriteResult:
+    async def update_summary(person_id: str, summary: str, mcp_ctx: Context) -> WriteResult:
+        _authorize_write(ctx, mcp_ctx)
+
         def op() -> WriteResult:
             person = _load_person_or_error(store, person_id)
             updated = _replace_field(person, summary=summary)
@@ -574,7 +617,9 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
             "(year unknown). Pass null to clear an existing birthday."
         )
     )
-    async def set_birthday(person_id: str, birthday: str | None) -> WriteResult:
+    async def set_birthday(person_id: str, birthday: str | None, mcp_ctx: Context) -> WriteResult:
+        _authorize_write(ctx, mcp_ctx)
+
         def op() -> WriteResult:
             person = _load_person_or_error(store, person_id)
             updated = _replace_field(person, birthday=birthday)
@@ -589,7 +634,11 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
             "null to indicate no proactive keep-in-touch priority."
         )
     )
-    async def set_contact_cadence(person_id: str, desired_contact_cadence_days: int | None) -> WriteResult:
+    async def set_contact_cadence(
+        person_id: str, desired_contact_cadence_days: int | None, mcp_ctx: Context
+    ) -> WriteResult:
+        _authorize_write(ctx, mcp_ctx)
+
         def op() -> WriteResult:
             person = _load_person_or_error(store, person_id)
             updated = _replace_field(person, desired_contact_cadence_days=desired_contact_cadence_days)

@@ -9,6 +9,7 @@ from pathlib import Path
 from mcp import ClientSession
 from mcp.client._memory import InMemoryTransport
 
+from montauk.auth import CredentialStore
 from montauk.embeddings.base import EmbeddingProvider
 from montauk.markdown_store import MarkdownStore
 from montauk.semantic_index import SemanticIndex
@@ -18,7 +19,12 @@ from montauk.tools_core import MontaukContext
 from montauk.write_queue import WriteQueue
 
 
-def build_context(tmp_path: Path, *, embedding_provider: EmbeddingProvider | None = None) -> MontaukContext:
+def build_context(
+    tmp_path: Path,
+    *,
+    embedding_provider: EmbeddingProvider | None = None,
+    credential_store: CredentialStore | None = None,
+) -> MontaukContext:
     data_dir = tmp_path / "data"
     store = MarkdownStore(data_dir)
     sqlite_index = SqliteIndex(data_dir / "index" / "relationships.sqlite")
@@ -27,16 +33,31 @@ def build_context(tmp_path: Path, *, embedding_provider: EmbeddingProvider | Non
     if embedding_provider is not None:
         semantic_index = SemanticIndex(data_dir / "index" / "vectors", embedding_provider)
     return MontaukContext(
-        store=store, sqlite_index=sqlite_index, write_queue=write_queue, semantic_index=semantic_index
+        store=store,
+        sqlite_index=sqlite_index,
+        write_queue=write_queue,
+        semantic_index=semantic_index,
+        credential_store=credential_store,
     )
 
 
 @asynccontextmanager
-async def running_session(tmp_path: Path, *, embedding_provider: EmbeddingProvider | None = None):
+async def running_session(
+    tmp_path: Path,
+    *,
+    embedding_provider: EmbeddingProvider | None = None,
+    credential_store: CredentialStore | None = None,
+):
     """A real MCP client<->server session over an in-memory transport, so
     tool calls go through full protocol dispatch (schema validation,
-    ToolError -> is_error conversion) rather than calling handlers directly."""
-    ctx = build_context(tmp_path, embedding_provider=embedding_provider)
+    ToolError -> is_error conversion) rather than calling handlers directly.
+
+    The in-memory transport never populates Context.headers (there's no
+    real HTTP request), so any auth-enabled session here exercises the
+    stdio identity-resolution path (ctx.stdio_identity); real HTTP-header
+    auth is exercised once the streamable-HTTP transport is wired up.
+    """
+    ctx = build_context(tmp_path, embedding_provider=embedding_provider, credential_store=credential_store)
     server = create_server(context=ctx)
     async with InMemoryTransport(server) as (read_stream, write_stream):
         async with ClientSession(read_stream, write_stream) as session:
