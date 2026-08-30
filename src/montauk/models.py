@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import re
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .dates import Birthday, FlexDate
 from .ids import PERSON_ID_RE
@@ -60,6 +60,8 @@ class Fact(BaseModel):
     confidence: Confidence = Confidence.HIGH
     text: str
     sources: list[Source] = Field(default_factory=list)
+    # One-way reference to another person ID (spec section 15); never mirrored.
+    related_person_id: str | None = None
 
     @field_validator("id")
     @classmethod
@@ -155,6 +157,18 @@ class Person(BaseModel):
         if v is not None and v <= 0:
             raise ValueError(f"desired_contact_cadence_days {v} must be a positive integer or null")
         return v
+
+    @model_validator(mode="after")
+    def _validate_unique_local_ids(self) -> Person:
+        fact_ids = [f.id for f in self.facts]
+        if len(fact_ids) != len(set(fact_ids)):
+            dupes = sorted({i for i in fact_ids if fact_ids.count(i) > 1})
+            raise ValueError(f"duplicate fact id(s) within person {self.id!r}: {dupes}")
+        interaction_ids = [i.id for i in self.interactions]
+        if len(interaction_ids) != len(set(interaction_ids)):
+            dupes = sorted({i for i in interaction_ids if interaction_ids.count(i) > 1})
+            raise ValueError(f"duplicate interaction id(s) within person {self.id!r}: {dupes}")
+        return self
 
     def fact_ids(self) -> list[str]:
         return [f.id for f in self.facts]

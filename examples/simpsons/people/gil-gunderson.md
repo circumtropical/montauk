@@ -1,0 +1,37 @@
+---
+id: gil-gunderson
+name: Gil Gunderson
+location: Springfield
+job_title: Car Salesman
+desired_contact_cadence_days: 180
+summary: Perpetually down-on-his-luck salesman; sold a used car once.
+---
+
+# Gil Gunderson
+
+## Family
+
+## Work & Education
+
+- id: fact-1
+  confidence: medium
+  text: Sells cars at a Springfield dealership; commission-only, it sounds like.
+
+## Interests
+
+## Relationship with User
+
+- id: fact-2
+  confidence: low
+  text: Bought a car from him once; he seemed grateful almost to the point of concern.
+
+## Life Events
+
+## General Notes
+
+## Interactions
+
+### int-1
+- date: 2025
+- channel: in-person
+- summary: Test-drove a car, ended up buying it out of pity.

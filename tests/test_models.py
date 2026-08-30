@@ -132,3 +132,31 @@ class TestPerson:
     def test_extra_fields_rejected(self):
         with pytest.raises(ValidationError):
             self._person(unknown_field="x")
+
+    def test_rejects_duplicate_fact_ids(self):
+        with pytest.raises(ValidationError):
+            self._person(
+                facts=[
+                    Fact(id="fact-1", category="Family", text="a"),
+                    Fact(id="fact-1", category="Interests", text="b"),
+                ]
+            )
+
+    def test_rejects_duplicate_interaction_ids(self):
+        with pytest.raises(ValidationError):
+            self._person(
+                interactions=[
+                    Interaction(id="int-1", date="2026"),
+                    Interaction(id="int-1", date="2025"),
+                ]
+            )
+
+
+class TestFactRelatedPerson:
+    def test_related_person_id_optional(self):
+        f = Fact(id="fact-1", category="Family", text="x")
+        assert f.related_person_id is None
+
+    def test_related_person_id_set(self):
+        f = Fact(id="fact-1", category="Family", text="Married to Jane", related_person_id="jane-chen")
+        assert f.related_person_id == "jane-chen"

@@ -1,0 +1,39 @@
+---
+id: frank-grimes
+name: Frank Grimes
+aliases:
+  - Grimey
+company: Springfield Nuclear Power Plant
+job_title: Executive Engineer
+summary: Former coworker of Homer's; self-made man, did not last long at the plant.
+---
+
+# Frank Grimes
+
+## Family
+
+## Work & Education
+
+- id: fact-1
+  date: 1997
+  confidence: high
+  text: Worked briefly at the Springfield Nuclear Power Plant as an executive engineer.
+
+## Interests
+
+## Relationship with User
+
+- id: fact-2
+  confidence: high
+  text: Met through Homer at the plant; relationship was tense.
+
+## Life Events
+
+- id: fact-3
+  date: 1997
+  confidence: high
+  text: Passed away shortly after starting at the plant. Record archived.
+
+## General Notes
+
+## Interactions
