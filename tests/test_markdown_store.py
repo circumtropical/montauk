@@ -193,6 +193,7 @@ class TestSimpsonsFixtureParses:
             "moe-szyslak.md",
             "gil-gunderson.md",
             "gil-gunderson-2.md",
+            "milhouse-van-houten.md",
         ],
     )
     def test_active_person_parses(self, filename):
@@ -220,6 +221,14 @@ class TestSimpsonsFixtureParses:
     def test_moe_has_cadence_but_no_interactions(self):
         p = markdown_to_person((SIMPSONS_DIR / "people" / "moe-szyslak.md").read_text())
         assert p.desired_contact_cadence_days is not None
+        assert p.interactions == []
+
+    def test_milhouse_is_a_minimal_bare_record(self):
+        p = markdown_to_person((SIMPSONS_DIR / "people" / "milhouse-van-houten.md").read_text())
+        assert p.birthday is None
+        assert p.desired_contact_cadence_days is None
+        assert p.summary is None
+        assert p.facts == []
         assert p.interactions == []
 
     def test_ned_flanders_birthday_has_no_year(self):

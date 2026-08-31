@@ -76,3 +76,24 @@ class TestReconcileOnStartup:
         store.write_person(Person(id="marge-simpson", name="Marge Simpson", summary="Keeps the house running."))
         reconcile_on_startup(ctx)
         assert ctx.semantic_index.chunk_count() == 2
+
+    def test_manual_hand_edit_becomes_active_after_reconciliation(self, tmp_path):
+        # Spec acceptance criterion: manual Markdown edits made outside
+        # any MCP tool call take effect after restart/reconciliation, not
+        # immediately (Phase 1 has no filesystem watcher).
+        config = _config(tmp_path)
+        store = MarkdownStore(config.data_dir_path)
+        store.write_person(Person(id="homer-simpson", name="Homer Simpson", summary="Original summary."))
+        ctx = build_context(config, with_semantic=False, with_auth=False)
+        reconcile_on_startup(ctx)
+        assert ctx.sqlite_index.get_row("homer-simpson")["summary"] == "Original summary."
+
+        # Simulate a human directly editing the file in a text editor,
+        # bypassing MarkdownStore/write_queue entirely.
+        path = store.person_path("homer-simpson")
+        path.write_text(path.read_text().replace("Original summary.", "Hand-edited summary."))
+
+        result = reconcile_on_startup(ctx)
+
+        assert result.valid["homer-simpson"].summary == "Hand-edited summary."
+        assert ctx.sqlite_index.get_row("homer-simpson")["summary"] == "Hand-edited summary."
