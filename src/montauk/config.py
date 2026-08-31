@@ -8,9 +8,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from .embeddings.local import DEFAULT_MODEL_NAME
 
@@ -21,6 +22,24 @@ class TransportConfig(BaseModel):
     mode: Literal["stdio", "remote"] = "stdio"
     host: str = "127.0.0.1"
     port: int = 8765
+    # Public base URL agents use to reach a "remote" deployment through a
+    # TLS-terminating reverse proxy, e.g. "https://montauk.example.com".
+    # When set, the streamable-HTTP transport adds this hostname to its
+    # Host-header allowlist, so the proxy can forward requests unchanged
+    # (no `header_up Host` rewrite needed). Ignored when mode is "stdio".
+    public_url: str | None = None
+
+    @field_validator("public_url")
+    @classmethod
+    def _validate_public_url(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        parts = urlsplit(value)
+        if parts.scheme not in ("http", "https") or not parts.hostname:
+            raise ValueError(
+                'transport.public_url must be an http(s) URL with a hostname, e.g. "https://montauk.example.com"'
+            )
+        return value.rstrip("/")
 
 
 class GitConfig(BaseModel):

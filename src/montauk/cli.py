@@ -16,7 +16,7 @@ from .bootstrap import build_context, reconcile_on_startup
 from .config import MontaukConfig, load_config
 from .embeddings.local import DEFAULT_MODEL_NAME
 from .git_snapshot import DailySnapshotScheduler, create_initial_commit, ensure_git_repo, snapshot_if_changed
-from .http_app import build_http_app
+from .http_app import build_http_app, build_transport_security
 from .logging_config import configure_logging
 from .markdown_store import MarkdownStore
 from .reconciliation import scan_people_directory, write_validation_report
@@ -56,6 +56,10 @@ transport:
   mode: stdio
   host: 127.0.0.1
   port: 8765
+  # For mode: remote behind a reverse proxy, set this to the URL agents
+  # connect to. It lets the proxy forward requests without rewriting the
+  # Host header. Leave unset for stdio.
+  # public_url: https://montauk.example.com
 
 git:
   enabled: true
@@ -303,6 +307,8 @@ def config_check(config: Path = typer.Option(..., "--config", help="Path to a YA
         raise typer.Exit(code=1) from exc
     typer.echo(f"data_dir: {cfg.data_dir_path}")
     typer.echo(f"transport: {cfg.transport.mode} ({cfg.transport.host}:{cfg.transport.port})")
+    if cfg.transport.public_url:
+        typer.echo(f"transport.public_url: {cfg.transport.public_url}")
     typer.echo(f"git.enabled: {cfg.git.enabled} (daily at {cfg.git.daily_snapshot_time})")
     typer.echo(f"search.semantic_enabled: {cfg.search.semantic_enabled}")
     typer.echo(f"embedding: {cfg.embedding.provider}/{cfg.embedding.model}")
@@ -323,7 +329,7 @@ def serve(
     asyncio.run(_serve_async(cfg, mode))
 
 
-def _maybe_warn_plaintext_remote(mode: str, host: str) -> None:
+def _maybe_warn_plaintext_remote(mode: str, host: str, public_url: str | None = None) -> None:
     """ctx.credential_store is always set for `serve` (build_context is
     called with with_auth=True unconditionally), so BearerAuthMiddleware
     already rejects every request without a valid, non-revoked
@@ -340,6 +346,12 @@ def _maybe_warn_plaintext_remote(mode: str, host: str) -> None:
             "put a TLS-terminating reverse proxy in front before exposing this beyond localhost",
             host,
         )
+    if mode == "remote" and not public_url:
+        logger.info(
+            "transport.public_url is not set; DNS-rebinding protection is disabled for the remote "
+            "transport (every request is still bearer-authenticated). Set it to the URL agents "
+            "connect to (e.g. https://montauk.example.com) to restrict the accepted Host header."
+        )
 
 
 async def _serve_async(cfg: MontaukConfig, mode: str) -> None:
@@ -350,7 +362,7 @@ async def _serve_async(cfg: MontaukConfig, mode: str) -> None:
         token = os.environ.get(ENV_VAR_AGENT_TOKEN)
         ctx.stdio_identity = resolve_stdio_identity(ctx.credential_store, token) if ctx.credential_store else None
     else:
-        _maybe_warn_plaintext_remote(mode, cfg.transport.host)
+        _maybe_warn_plaintext_remote(mode, cfg.transport.host, cfg.transport.public_url)
 
     mcp_server = create_server(context=ctx)
 
@@ -365,7 +377,17 @@ async def _serve_async(cfg: MontaukConfig, mode: str) -> None:
         else:
             import uvicorn
 
-            http_app = build_http_app(mcp_server, credential_store=ctx.credential_store, host=cfg.transport.host)
+            http_app = build_http_app(
+                mcp_server,
+                credential_store=ctx.credential_store,
+                host=cfg.transport.host,
+                transport_security=build_transport_security(
+                    mode=mode,
+                    host=cfg.transport.host,
+                    port=cfg.transport.port,
+                    public_url=cfg.transport.public_url,
+                ),
+            )
             uvicorn_config = uvicorn.Config(
                 http_app, host=cfg.transport.host, port=cfg.transport.port, log_level=cfg.logging.level.lower()
             )

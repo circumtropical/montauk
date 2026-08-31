@@ -22,6 +22,31 @@ class TestDefaults:
         config = MontaukConfig(data_dir="./data")
         assert config.data_dir_path.is_absolute()
 
+    def test_public_url_defaults_to_none(self):
+        assert MontaukConfig().transport.public_url is None
+
+
+class TestPublicUrl:
+    def test_accepts_https_url_and_strips_trailing_slash(self):
+        config = MontaukConfig(transport={"public_url": "https://montauk.example.com/"})
+        assert config.transport.public_url == "https://montauk.example.com"
+
+    def test_accepts_plain_http_url(self):
+        config = MontaukConfig(transport={"public_url": "http://10.0.0.4:8765"})
+        assert config.transport.public_url == "http://10.0.0.4:8765"
+
+    def test_rejects_url_without_scheme(self):
+        with pytest.raises(ValidationError, match="public_url"):
+            MontaukConfig(transport={"public_url": "montauk.example.com"})
+
+    def test_rejects_non_http_scheme(self):
+        with pytest.raises(ValidationError, match="public_url"):
+            MontaukConfig(transport={"public_url": "ftp://montauk.example.com"})
+
+    def test_rejects_url_without_hostname(self):
+        with pytest.raises(ValidationError, match="public_url"):
+            MontaukConfig(transport={"public_url": "https://"})
+
 
 class TestLoadConfig:
     def test_loads_yaml_file(self, tmp_path):

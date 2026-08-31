@@ -18,6 +18,12 @@ transport:
   # terminating reverse proxy in front for real remote deployments.
   host: 127.0.0.1
   port: 8765
+  # For mode: remote, the external URL agents connect to through the
+  # reverse proxy. When set, the transport accepts this hostname in the
+  # Host header, so the proxy can forward requests unchanged. When unset,
+  # DNS-rebinding protection is disabled for the remote transport (every
+  # request is still bearer-authenticated). Ignored for stdio.
+  # public_url: https://montauk.example.com
 
 git:
   enabled: true

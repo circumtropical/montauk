@@ -99,11 +99,34 @@ never edited through this CLI -- only through MCP tools or by hand-editing the M
 
 ## Remote (authenticated HTTPS) deployment
 
-Set `transport.mode: remote` in the config. Montauk refuses to start a remote transport bound to
-`0.0.0.0`/`::` unless auth is configured (it is, by default) -- put a TLS-terminating reverse
-proxy in front for real internet-facing deployments; Montauk itself only speaks plain HTTP.
-Each remote agent authenticates with `Authorization: Bearer <token>` from
-`montauk agents create`.
+Set `transport.mode: remote` in the config and keep `host: 127.0.0.1` -- Montauk only speaks
+plain HTTP, so a TLS-terminating reverse proxy on the same host handles the internet-facing side.
+Each remote agent authenticates with `Authorization: Bearer <token>` from `montauk agents create`.
+
+Also set `transport.public_url` to the URL agents connect to, e.g.:
+
+```yaml
+transport:
+  mode: remote
+  host: 127.0.0.1
+  port: 8765
+  public_url: https://montauk.example.com
+```
+
+`public_url` adds that hostname to the transport's Host-header allowlist, so the proxy can
+forward requests unchanged -- a plain `reverse_proxy 127.0.0.1:8765` is enough, with no
+`header_up Host` rewrite. The MCP endpoint is served at path `/mcp`, so agents connect to
+`https://montauk.example.com/mcp`. A minimal Caddy site:
+
+```caddy
+montauk.example.com {
+	reverse_proxy 127.0.0.1:8765
+}
+```
+
+If `public_url` is left unset, DNS-rebinding protection is disabled for the remote transport
+(every request is still bearer-authenticated); binding `0.0.0.0`/`::` additionally logs a
+plaintext-exposure warning.
 
 ## Docker
 
