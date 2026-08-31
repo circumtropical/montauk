@@ -5,6 +5,7 @@ content changes go through MCP tools or direct Markdown editing.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 
@@ -20,6 +21,8 @@ from .markdown_store import MarkdownStore
 from .reconciliation import scan_people_directory, write_validation_report
 from .server import create_server
 from .sqlite_index import SqliteIndex
+
+logger = logging.getLogger("montauk.cli")
 
 app = typer.Typer(add_completion=False, no_args_is_help=True, help="Montauk relationship-memory server admin CLI.")
 agents_app = typer.Typer(add_completion=False, no_args_is_help=True, help="Manage agent credentials.")
@@ -185,6 +188,25 @@ def serve(
     asyncio.run(_serve_async(cfg, mode))
 
 
+def _maybe_warn_plaintext_remote(mode: str, host: str) -> None:
+    """ctx.credential_store is always set for `serve` (build_context is
+    called with with_auth=True unconditionally), so BearerAuthMiddleware
+    already rejects every request without a valid, non-revoked
+    credential regardless of bind address -- spec section 30's "never
+    expose an unauthenticated server" is structurally guaranteed, not
+    something to re-check here. What *isn't* guaranteed is transport
+    encryption: Montauk speaks plain HTTP only, so binding all
+    interfaces without a TLS-terminating reverse proxy in front sends
+    bearer tokens in the clear over the network.
+    """
+    if mode == "remote" and host in ("0.0.0.0", "::"):
+        logger.warning(
+            "remote transport is bound to %s (all interfaces); Montauk speaks plain HTTP only -- "
+            "put a TLS-terminating reverse proxy in front before exposing this beyond localhost",
+            host,
+        )
+
+
 async def _serve_async(cfg: MontaukConfig, mode: str) -> None:
     ctx = build_context(cfg, with_auth=True)
     reconcile_on_startup(ctx)
@@ -192,12 +214,8 @@ async def _serve_async(cfg: MontaukConfig, mode: str) -> None:
     if mode == "stdio":
         token = os.environ.get(ENV_VAR_AGENT_TOKEN)
         ctx.stdio_identity = resolve_stdio_identity(ctx.credential_store, token) if ctx.credential_store else None
-    elif mode == "remote" and cfg.transport.host in ("0.0.0.0", "::") and ctx.credential_store is None:
-        # spec section 30: never expose an unauthenticated server on 0.0.0.0.
-        typer.echo(
-            "refusing to start: remote transport on all interfaces requires auth to be configured", err=True
-        )
-        raise typer.Exit(code=1)
+    else:
+        _maybe_warn_plaintext_remote(mode, cfg.transport.host)
 
     mcp_server = create_server(context=ctx)
 

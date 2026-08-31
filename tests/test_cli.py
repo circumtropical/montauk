@@ -1,6 +1,8 @@
+import logging
+
 from typer.testing import CliRunner
 
-from montauk.cli import app
+from montauk.cli import _maybe_warn_plaintext_remote, app
 from montauk.markdown_store import MarkdownStore
 from montauk.models import Person
 
@@ -132,6 +134,28 @@ class TestConfigCheck:
     def test_missing_config_file_exits_nonzero(self, tmp_path):
         result = runner.invoke(app, ["config-check", "--config", str(tmp_path / "nonexistent.yaml")])
         assert result.exit_code == 1
+
+
+class TestPlaintextRemoteWarning:
+    def test_warns_when_binding_all_interfaces_in_remote_mode(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="montauk.cli"):
+            _maybe_warn_plaintext_remote("remote", "0.0.0.0")
+        assert "TLS-terminating reverse proxy" in caplog.text
+
+    def test_warns_for_ipv6_all_interfaces_too(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="montauk.cli"):
+            _maybe_warn_plaintext_remote("remote", "::")
+        assert "TLS-terminating reverse proxy" in caplog.text
+
+    def test_no_warning_for_loopback(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="montauk.cli"):
+            _maybe_warn_plaintext_remote("remote", "127.0.0.1")
+        assert caplog.text == ""
+
+    def test_no_warning_for_stdio_mode_regardless_of_host(self, caplog):
+        with caplog.at_level(logging.WARNING, logger="montauk.cli"):
+            _maybe_warn_plaintext_remote("stdio", "0.0.0.0")
+        assert caplog.text == ""
 
 
 class TestBareInvocation:
