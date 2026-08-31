@@ -163,3 +163,82 @@ class TestBareInvocation:
         result = runner.invoke(app, [])
         assert "Usage" in result.stdout
         assert "serve" in result.stdout
+
+
+def _git(data_dir, *args) -> str:
+    import subprocess
+
+    return subprocess.run(
+        ["git", *args], cwd=data_dir, capture_output=True, text=True, check=True
+    ).stdout
+
+
+class TestInit:
+    def test_requires_a_target(self):
+        result = runner.invoke(app, ["init"])
+        assert result.exit_code == 1
+        assert "--data-dir" in result.stderr
+
+    def test_scaffolds_directory_layout_and_config(self, tmp_path):
+        data_dir = tmp_path / "data"
+        result = runner.invoke(app, ["init", "--data-dir", str(data_dir)])
+
+        assert result.exit_code == 0
+        assert (data_dir / "people").is_dir()
+        assert (data_dir / "archive").is_dir()
+        assert (data_dir / "config.yaml").exists()
+        assert (data_dir / "README.md").exists()
+        assert (data_dir / ".gitignore").exists()
+
+    def test_starter_config_points_at_the_data_dir_and_loads(self, tmp_path):
+        from montauk.config import load_config
+
+        data_dir = tmp_path / "data"
+        runner.invoke(app, ["init", "--data-dir", str(data_dir)])
+
+        cfg = load_config(data_dir / "config.yaml")
+        assert cfg.data_dir_path == data_dir.resolve()
+
+    def test_gitignore_excludes_secrets_and_derived_data(self, tmp_path):
+        data_dir = tmp_path / "data"
+        runner.invoke(app, ["init", "--data-dir", str(data_dir)])
+
+        gitignore = (data_dir / ".gitignore").read_text()
+        for excluded in ("auth/", "index/", "logs/"):
+            assert excluded in gitignore
+
+    def test_creates_initial_commit_on_main_without_a_remote(self, tmp_path):
+        data_dir = tmp_path / "data"
+        runner.invoke(app, ["init", "--data-dir", str(data_dir)])
+
+        assert _git(data_dir, "symbolic-ref", "--short", "HEAD").strip() == "main"
+        assert _git(data_dir, "log", "--format=%s").strip() == "Initialise Montauk data repository"
+        assert _git(data_dir, "remote").strip() == ""
+
+    def test_initial_commit_tracks_scaffold_but_not_auth_or_index(self, tmp_path):
+        data_dir = tmp_path / "data"
+        runner.invoke(app, ["init", "--data-dir", str(data_dir)])
+
+        tracked = _git(data_dir, "ls-files").split()
+        assert "config.yaml" in tracked
+        assert "README.md" in tracked
+        assert "people/.gitkeep" in tracked
+        assert not any(p.startswith("auth/") or p.startswith("index/") for p in tracked)
+
+    def test_is_idempotent(self, tmp_path):
+        data_dir = tmp_path / "data"
+        first = runner.invoke(app, ["init", "--data-dir", str(data_dir)])
+        second = runner.invoke(app, ["init", "--data-dir", str(data_dir)])
+
+        assert first.exit_code == 0
+        assert second.exit_code == 0
+        assert _git(data_dir, "log", "--format=%s").count("Initialise Montauk data repository") == 1
+
+    def test_does_not_clobber_an_existing_config(self, tmp_path):
+        data_dir = tmp_path / "data"
+        data_dir.mkdir()
+        (data_dir / "config.yaml").write_text("data_dir: /custom\n", encoding="utf-8")
+
+        runner.invoke(app, ["init", "--data-dir", str(data_dir)])
+
+        assert (data_dir / "config.yaml").read_text() == "data_dir: /custom\n"

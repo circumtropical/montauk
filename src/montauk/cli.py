@@ -14,7 +14,8 @@ import typer
 from .auth import ENV_VAR_AGENT_TOKEN, CredentialStore, resolve_stdio_identity
 from .bootstrap import build_context, reconcile_on_startup
 from .config import MontaukConfig, load_config
-from .git_snapshot import DailySnapshotScheduler, snapshot_if_changed
+from .embeddings.local import DEFAULT_MODEL_NAME
+from .git_snapshot import DailySnapshotScheduler, create_initial_commit, ensure_git_repo, snapshot_if_changed
 from .http_app import build_http_app
 from .logging_config import configure_logging
 from .markdown_store import MarkdownStore
@@ -39,6 +40,140 @@ def _resolve_config(config: Path | None, data_dir: Path | None) -> MontaukConfig
             cfg = cfg.model_copy(update={"data_dir": str(data_dir)})
         return cfg
     return MontaukConfig(data_dir=str(data_dir) if data_dir is not None else "./data")
+
+
+_STARTER_CONFIG = """\
+# Montauk deployment configuration (spec section 31).
+# Non-secret settings only -- agent credentials are managed via
+# `montauk agents create` and never belong in this file.
+
+data_dir: {data_dir}
+
+transport:
+  # "stdio" for a single local agent host launching `montauk serve`
+  # directly; "remote" for authenticated HTTPS access by multiple agents
+  # (put a TLS-terminating reverse proxy in front).
+  mode: stdio
+  host: 127.0.0.1
+  port: 8765
+
+git:
+  enabled: true
+  # 24-hour local time; at most one automatic commit per day, only if
+  # canonical data changed. Never auto-pushes.
+  daily_snapshot_time: "03:00"
+
+search:
+  semantic_enabled: true
+  max_candidates: 5
+  similarity_threshold: 0.35
+
+embedding:
+  provider: local
+  model: {model}
+
+logging:
+  level: INFO
+  retention_days: 30
+"""
+
+_DATA_REPO_README = """\
+# Montauk relationship data
+
+This is the **private** canonical data store for a Montauk deployment
+(relationship memory for personal agents). It contains personal information
+about real people.
+
+**Keep this repository private.** The Montauk source code lives in a separate
+repository; this one never should be made public.
+
+## Layout
+
+- `people/`  -- one Markdown file per active person; canonical and authoritative
+- `archive/` -- people archived out of active use
+- `config.yaml` -- this deployment's non-secret settings
+
+Excluded from version control (see `.gitignore`): `index/` (derived SQLite and
+vector indexes, rebuilt on demand), `auth/` (agent credentials -- secret),
+`logs/`, and `validation-report.json`.
+
+## Recovery
+
+The derived indexes are disposable. After cloning this repository:
+
+    montauk rebuild-index   --data-dir .
+    montauk rebuild-vectors --data-dir .
+
+regenerates them from the Markdown files.
+"""
+
+
+@app.command()
+def init(config: Path | None = ConfigOption, data_dir: Path | None = DataDirOption) -> None:
+    """Scaffold a new deployment: create the data directory and a starter
+    config, and initialise (but never push) a private git repository for the
+    canonical Markdown data.
+    """
+    if config is None and data_dir is None:
+        typer.echo(
+            "error: pass --data-dir PATH (or --config PATH) so init knows where to create the deployment",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    cfg = _resolve_config(config, data_dir)
+    target = cfg.data_dir_path
+
+    # 1. Canonical directory layout (MarkdownStore creates people/ and archive/).
+    MarkdownStore(target)
+    for sub in ("people", "archive"):
+        keep = target / sub / ".gitkeep"
+        if not keep.exists():
+            keep.write_text("", encoding="utf-8")
+
+    # 2. Starter config, unless the operator pointed at their own with --config.
+    wrote_config = False
+    if config is None:
+        config_path = target / "config.yaml"
+        if not config_path.exists():
+            config_path.write_text(
+                _STARTER_CONFIG.format(data_dir=target, model=DEFAULT_MODEL_NAME), encoding="utf-8"
+            )
+            wrote_config = True
+
+    # 3. Data-repo README.
+    readme_path = target / "README.md"
+    if not readme_path.exists():
+        readme_path.write_text(_DATA_REPO_README, encoding="utf-8")
+
+    # 4. Private git repo on branch main, with an initial commit so it can be
+    #    pushed to a remote. Montauk itself never adds a remote or pushes.
+    ensure_git_repo(target)
+    committed = create_initial_commit(
+        target,
+        message="Initialise Montauk data repository",
+        extra_paths=("README.md", "config.yaml", "people/.gitkeep", "archive/.gitkeep"),
+    )
+
+    typer.echo(f"Initialised Montauk deployment at {target}")
+    typer.echo("  people/, archive/   canonical Markdown (git-tracked)")
+    if wrote_config:
+        typer.echo("  config.yaml         starter config written (edit to taste)")
+    typer.echo("  .gitignore          excludes index/, auth/, logs/")
+    typer.echo(
+        f"  git repo            {'initial commit created on main' if committed else 'already had commits'}"
+    )
+    typer.echo("")
+    typer.echo("Next steps:")
+    typer.echo("  1. Create an EMPTY private repo on your git host (no README / license / .gitignore).")
+    typer.echo(f"  2. cd {target}")
+    typer.echo("     git remote add origin git@github.com:<you>/<your-data-repo>.git")
+    typer.echo("     git push -u origin main")
+    typer.echo("  3. `montauk serve` commits new/changed person files locally each day but never")
+    typer.echo("     pushes. To mirror to your remote, add a cron entry, e.g.:")
+    typer.echo(f"       15 3 * * *  cd {target} && git push -q origin main")
+    typer.echo("  4. Create an agent credential:")
+    typer.echo(f"     montauk agents create --name my-agent --role read_write --data-dir {target}")
 
 
 @app.command()

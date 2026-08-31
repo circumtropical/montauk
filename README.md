@@ -12,17 +12,55 @@ full Phase 1 specification this implementation follows.
 
 ```bash
 uv sync
-uv run montauk agents create --name my-agent --role read_write --data-dir ./data
+uv run montauk init --data-dir ~/.local/share/montauk
+uv run montauk agents create --name my-agent --role read_write --data-dir ~/.local/share/montauk
 # prints a token once -- save it
 export MONTAUK_AGENT_TOKEN=<the token printed above>
-uv run montauk serve --data-dir ./data
+uv run montauk serve --config ~/.local/share/montauk/config.yaml
 ```
 
 `serve` reads `MONTAUK_AGENT_TOKEN` once at startup to resolve the single stdio client's
 identity (there is exactly one client on stdio, so there's no per-request header to read).
-Point an MCP-compatible agent host at `uv run montauk serve --data-dir ./data` as a local stdio
-server. Try it against the bundled Simpsons fixture instead of an empty repo by pointing
-`--data-dir` at `examples/simpsons/`.
+Point an MCP-compatible agent host at that `serve` command as a local stdio server. Try it
+against the bundled Simpsons fixture instead of an empty repo by pointing `--data-dir` at
+`examples/simpsons/`.
+
+## Setting up your private data repository
+
+`montauk init` scaffolds a deployment: it creates the data directory (`people/`, `archive/`),
+writes a starter `config.yaml`, and initialises a **local** git repository for the canonical
+Markdown -- on branch `main`, with an initial commit, and a `.gitignore` that excludes the
+derived indexes (`index/`), agent credentials (`auth/`), and logs.
+
+```bash
+uv run montauk init --data-dir ~/.local/share/montauk
+```
+
+Choose a data directory **outside** this source checkout -- `~/.local/share/montauk` for a
+personal deployment, `/var/lib/montauk` for a system service. Never put it inside a synced
+folder (Dropbox/iCloud/Drive): sync races corrupt the git repo and it copies plaintext personal
+data to a third party.
+
+This data repository holds real personal information, so keep it **private and separate** from
+the Montauk source code. Montauk deliberately never adds a git remote and never pushes (spec
+§29) -- that is yours to wire up:
+
+```bash
+cd ~/.local/share/montauk
+# create an EMPTY private repo on your git host first (no README / license / .gitignore)
+git remote add origin git@github.com:<you>/<your-data-repo>.git
+git push -u origin main
+```
+
+While `montauk serve` runs it makes at most one local commit per day, when a person file has
+changed. Pushing those commits to your remote is up to you -- e.g. a cron entry:
+
+```
+15 3 * * *  cd ~/.local/share/montauk && git push -q origin main
+```
+
+`montauk init` is idempotent and never clobbers an existing `config.yaml`, so it is safe to
+re-run.
 
 ## Configuration
 
@@ -41,6 +79,7 @@ for the one environment variable the stdio transport reads (`MONTAUK_AGENT_TOKEN
 ## Admin CLI
 
 ```
+montauk init --data-dir PATH              # scaffold a new deployment + private data repo
 montauk validate                          # scan + validate; exit 1 if unhealthy
 montauk status                            # health summary
 montauk rebuild-index                     # rebuild the derived SQLite index from Markdown

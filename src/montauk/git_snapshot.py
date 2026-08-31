@@ -19,19 +19,28 @@ import asyncio
 import datetime as dt
 import logging
 import subprocess
+from collections.abc import Sequence
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_DAILY_TIME = dt.time(3, 0)
+DEFAULT_BRANCH = "main"
 
 _DATA_GITIGNORE = (
     "# Derived/disposable indexes and credentials are never snapshotted.\n"
     "index/\n"
     "auth/\n"
+    "logs/\n"
     "validation-report.json\n"
     ".montauk.lock\n"
 )
+
+# Automated commits (initial scaffold + daily snapshots) get a clearly
+# bot-like identity distinct from any human owner, scoped to just the
+# invocation so no persistent git config write is needed and it works
+# regardless of the environment's global git config.
+_COMMIT_IDENTITY = ["-c", "user.name=Montauk", "-c", "user.email=montauk@localhost"]
 
 
 class GitSnapshotError(Exception):
@@ -42,7 +51,7 @@ def _run_git(args: list[str], cwd: Path) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True, check=False)
 
 
-def ensure_git_repo(data_dir: Path | str) -> None:
+def ensure_git_repo(data_dir: Path | str, *, default_branch: str = DEFAULT_BRANCH) -> None:
     data_dir = Path(data_dir)
     data_dir.mkdir(parents=True, exist_ok=True)
     if (data_dir / ".git").exists():
@@ -50,9 +59,44 @@ def ensure_git_repo(data_dir: Path | str) -> None:
     result = _run_git(["init"], cwd=data_dir)
     if result.returncode != 0:
         raise GitSnapshotError(f"git init failed in {data_dir}: {result.stderr}")
+    # Pin the initial branch name deterministically instead of depending on
+    # the host git's version or init.defaultBranch. Safe here: the repo was
+    # just created, the branch is unborn, and there are no refs yet.
+    branch_result = _run_git(["symbolic-ref", "HEAD", f"refs/heads/{default_branch}"], cwd=data_dir)
+    if branch_result.returncode != 0:
+        raise GitSnapshotError(f"git symbolic-ref failed in {data_dir}: {branch_result.stderr}")
     gitignore = data_dir / ".gitignore"
     if not gitignore.exists():
         gitignore.write_text(_DATA_GITIGNORE, encoding="utf-8")
+
+
+def repo_has_commits(data_dir: Path | str) -> bool:
+    result = _run_git(["rev-parse", "--verify", "--quiet", "HEAD"], cwd=Path(data_dir))
+    return result.returncode == 0
+
+
+def create_initial_commit(
+    data_dir: Path | str, *, message: str, extra_paths: Sequence[str] = ()
+) -> bool:
+    """Make the first commit in a freshly-initialised data repo so the branch
+    exists and can be pushed to a remote. No-op (returns False) if the repo
+    already has any commit, or if there is nothing to commit. Montauk never
+    adds a remote or pushes -- that is left to the operator (spec section 29).
+    """
+    data_dir = Path(data_dir)
+    ensure_git_repo(data_dir)
+    if repo_has_commits(data_dir):
+        return False
+    paths = [p for p in (".gitignore", *extra_paths) if (data_dir / p).exists()]
+    if not paths:
+        return False
+    add_result = _run_git(["add", "--", *paths], cwd=data_dir)
+    if add_result.returncode != 0:
+        raise GitSnapshotError(f"git add failed in {data_dir}: {add_result.stderr}")
+    commit_result = _run_git([*_COMMIT_IDENTITY, "commit", "-m", message], cwd=data_dir)
+    if commit_result.returncode != 0:
+        raise GitSnapshotError(f"git commit failed in {data_dir}: {commit_result.stderr}")
+    return True
 
 
 def snapshot_if_changed(data_dir: Path | str, *, message: str | None = None) -> bool:
@@ -86,14 +130,7 @@ def snapshot_if_changed(data_dir: Path | str, *, message: str | None = None) -> 
         raise GitSnapshotError(f"git add failed in {data_dir}: {add_result.stderr}")
 
     commit_message = message or f"Montauk daily snapshot {dt.date.today().isoformat()}"
-    # -c user.name/user.email scoped to just this invocation: automated
-    # snapshot commits get a clearly bot-like identity distinct from any
-    # human owner, and this works regardless of the environment's global
-    # git config (no persistent config write required).
-    commit_result = _run_git(
-        ["-c", "user.name=Montauk", "-c", "user.email=montauk@localhost", "commit", "-m", commit_message],
-        cwd=data_dir,
-    )
+    commit_result = _run_git([*_COMMIT_IDENTITY, "commit", "-m", commit_message], cwd=data_dir)
     if commit_result.returncode != 0:
         raise GitSnapshotError(f"git commit failed in {data_dir}: {commit_result.stderr}")
     return True

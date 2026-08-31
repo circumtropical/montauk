@@ -4,7 +4,13 @@ from pathlib import Path
 
 import pytest
 
-from montauk.git_snapshot import DailySnapshotScheduler, ensure_git_repo, snapshot_if_changed
+from montauk.git_snapshot import (
+    DailySnapshotScheduler,
+    create_initial_commit,
+    ensure_git_repo,
+    repo_has_commits,
+    snapshot_if_changed,
+)
 
 
 def _git_log(data_dir: Path) -> list[str]:
@@ -12,6 +18,13 @@ def _git_log(data_dir: Path) -> list[str]:
         ["git", "log", "--format=%s"], cwd=data_dir, capture_output=True, text=True, check=True
     )
     return [line for line in result.stdout.splitlines() if line]
+
+
+def _current_branch(data_dir: Path) -> str:
+    result = subprocess.run(
+        ["git", "symbolic-ref", "--short", "HEAD"], cwd=data_dir, capture_output=True, text=True, check=True
+    )
+    return result.stdout.strip()
 
 
 def _write_person_file(data_dir: Path, name: str, content: str) -> None:
@@ -37,6 +50,48 @@ class TestEnsureGitRepo:
         data_dir = tmp_path / "data"
         ensure_git_repo(data_dir)
         ensure_git_repo(data_dir)  # does not raise or re-init
+
+    def test_initial_branch_is_main(self, tmp_path):
+        data_dir = tmp_path / "data"
+        ensure_git_repo(data_dir)
+        assert _current_branch(data_dir) == "main"
+
+    def test_gitignore_excludes_logs(self, tmp_path):
+        data_dir = tmp_path / "data"
+        ensure_git_repo(data_dir)
+        assert "logs/" in (data_dir / ".gitignore").read_text()
+
+
+class TestCreateInitialCommit:
+    def test_creates_first_commit_on_main(self, tmp_path):
+        data_dir = tmp_path / "data"
+        committed = create_initial_commit(data_dir, message="init")
+
+        assert committed is True
+        assert repo_has_commits(data_dir) is True
+        assert _current_branch(data_dir) == "main"
+        assert _git_log(data_dir) == ["init"]
+
+    def test_no_op_when_repo_already_has_a_commit(self, tmp_path):
+        data_dir = tmp_path / "data"
+        create_initial_commit(data_dir, message="first")
+
+        assert create_initial_commit(data_dir, message="second") is False
+        assert _git_log(data_dir) == ["first"]
+
+    def test_stages_only_existing_extra_paths(self, tmp_path):
+        data_dir = tmp_path / "data"
+        ensure_git_repo(data_dir)
+        (data_dir / "README.md").write_text("hi", encoding="utf-8")
+
+        create_initial_commit(data_dir, message="init", extra_paths=("README.md", "config.yaml"))
+
+        tracked = subprocess.run(
+            ["git", "ls-files"], cwd=data_dir, capture_output=True, text=True, check=True
+        ).stdout.split()
+        assert ".gitignore" in tracked
+        assert "README.md" in tracked
+        assert "config.yaml" not in tracked
 
 
 class TestSnapshotIfChanged:
