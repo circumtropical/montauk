@@ -15,6 +15,13 @@ currently known — it can be partial or wrong at first and corrected later with
 touching the ID or the filename (`data/people/P0001.md`). A deployment still on the old
 name-derived IDs (`mike-chen`) converts once with `montauk migrate-ids`.
 
+**Purpose-specific retrieval.** `prepare_person_context(person_id, purpose, detail_level, max_tokens)`
+returns a token-bounded evidence packet — the facts, relationships, and interactions from one
+person's record relevant to a stated question — selected with hybrid lexical (BM25) + semantic
+retrieval and stripped of storage metadata. It is evidence, not an answer: Montauk never
+generates advice, quotations, or missing facts. Semantic search runs locally by default (no
+data leaves the machine) and degrades to lexical-only, transparently, when unavailable.
+
 ## Quick start (local, stdio)
 
 ```bash
@@ -90,8 +97,8 @@ montauk init --data-dir PATH              # scaffold a new deployment + private 
 montauk validate                          # scan + validate; exit 1 if unhealthy
 montauk status                            # health summary
 montauk migrate-ids                       # one-time: convert name-derived IDs to generic P0001 IDs
-montauk rebuild-index                     # rebuild the derived SQLite index from Markdown
-montauk rebuild-vectors                   # rebuild the derived semantic index from Markdown
+montauk rebuild-index                     # rebuild both derived indexes (--relational-only / --semantic-only)
+montauk index-status                      # derived-index health + retrieval mode (no personal content)
 montauk git-snapshot                      # commit data/people + data/archive now, if changed
 montauk agents list
 montauk agents create --name X --role read_only|read_write
@@ -168,3 +175,8 @@ used by the test suite and handy for manual exploration -- it includes a duplica
 collision, a missing-birth-year birthday, a person with a contact cadence but no recorded
 interactions, an archived person, and one deliberately malformed file, exercising the
 corresponding edge cases end to end.
+
+`examples/dating/` is a second synthetic fixture (a fictional dating contact and a mutual
+friend) used to exercise `prepare_person_context`: broad, exact-detail, temporal, and advisory
+questions, an interaction, a relationship reference, and deliberate gaps (dogs but no dog name,
+a birthday month but no day).

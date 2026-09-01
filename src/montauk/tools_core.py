@@ -17,10 +17,12 @@ from mcp.server.mcpserver import Context, MCPServer
 from pydantic import ValidationError as PydanticValidationError
 
 from .auth import AgentIdentity, CredentialStore, require_write, resolve_http_identity
+from .config import RetrievalConfig
 from .errors import ArchivedError, MontaukValidationError, NotFoundError
 from .ids import PERSON_ID_RE, next_fact_id, next_interaction_id, normalize_alias
 from .markdown_store import MarkdownStore, PersonNotFoundError, person_to_markdown
 from .models import ContactInfo, Fact, Interaction, Person, Source
+from .person_context import DETAIL_LEVELS, build_person_context
 from .schema import CATEGORIES
 from .semantic_index import SemanticIndex
 from .sqlite_index import SqliteIndex, compute_content_hash
@@ -31,6 +33,7 @@ from .tool_types import (
     InteractionMutationResult,
     NameUpdateResult,
     PersonCandidate,
+    PersonContextResponse,
     PersonCore,
     RecordInteractionOp,
     RemoveFactOp,
@@ -160,6 +163,18 @@ class MontaukContext:
     # ~0.45-0.75 cosine similarity while unrelated pairs score ~-0.1-0.05, so
     # 0.55 (the spec's example) silently dropped genuinely relevant matches.
     similarity_threshold: float = 0.35
+    # Purpose-specific retrieval budgets/toggles (prepare_person_context).
+    # None -> library defaults (RetrievalConfig()).
+    retrieval: RetrievalConfig | None = None
+    # Set at startup when the whole semantic index is unusable as *current*
+    # semantic evidence (model/schema/chunking drift, dimension mismatch)
+    # and an automatic rebuild wasn't possible. Retrieval then falls back
+    # to lexical and says so; it never serves known-stale semantic results.
+    semantic_stale_reason: str | None = None
+
+    @property
+    def retrieval_config(self) -> RetrievalConfig:
+        return self.retrieval or RetrievalConfig()
 
 
 def _load_person_or_error(store: MarkdownStore, person_id: str) -> Person:
@@ -223,9 +238,10 @@ def _write_and_index(ctx: MontaukContext, person: Person) -> IndexUpdateStatus:
     ctx.store.write_person(person)
     try:
         path = ctx.store.person_path(person.id)
-        ctx.sqlite_index.upsert_person(person, file_path=str(path), content_hash=compute_content_hash(path))
+        content_hash = compute_content_hash(path)
+        ctx.sqlite_index.upsert_person(person, file_path=str(path), content_hash=content_hash)
         if ctx.semantic_index is not None:
-            ctx.semantic_index.upsert_person(person)
+            ctx.semantic_index.upsert_person(person, content_hash=content_hash)
         return "ok"
     except Exception:
         logger.exception("failed to update derived index for person %r", person.id)
@@ -480,13 +496,82 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
     @server.tool(
         description=(
             "Return the complete canonical Markdown record for a known person_id, including every "
-            "fact and interaction. Use intentionally: this returns substantially more content than "
-            "get_person/get_facts/get_interactions and consumes more model context. Prefer targeted "
-            "retrieval tools for narrow questions."
+            "fact and interaction. Use intentionally and only for explicit review, export, or "
+            "maintenance -- for an ordinary question about a person, use prepare_person_context, "
+            "which returns just the relevant evidence within a token budget. This returns "
+            "substantially more content and consumes more model context."
         )
     )
     async def get_full_record(person_id: str) -> str:
         return person_to_markdown(_load_person_or_error(store, person_id))
+
+    @server.tool(
+        description=(
+            "Return a compact, purpose-specific evidence packet about one known person_id: the "
+            "facts, relationships, and interactions from their stored memory that are relevant to "
+            "`purpose`, selected with hybrid lexical + semantic retrieval and trimmed to a token "
+            "budget. Supply `purpose` as the actual question or task -- retrieval quality depends on "
+            "it. Results are selected canonical memory, substantially verbatim; storage metadata is "
+            "intentionally stripped. This is not Montauk's advice and not a generated answer: the "
+            "calling agent interprets the evidence and is responsible for advice, recommendations, "
+            "compatibility judgments, and any external research. If a specific detail is absent, the "
+            "packet simply will not contain it -- do not invent names, quotations, or facts to fill "
+            "the gap; narrow the purpose or fetch the cited records instead. detail_level: 'brief' "
+            "(~identity/quick reminder), 'standard' (most questions), 'comprehensive' (organized "
+            "briefing of all materially relevant content that fits). max_tokens optionally overrides "
+            "the preset within server bounds. When retrieval.truncated is true or semantic_available "
+            "is false, narrow the purpose or retrieve specific records with get_facts / "
+            "get_interactions / get_full_record."
+        )
+    )
+    async def prepare_person_context(
+        person_id: str,
+        purpose: str,
+        detail_level: str = "standard",
+        max_tokens: int | None = None,
+    ) -> PersonContextResponse:
+        if not purpose or not purpose.strip():
+            raise MontaukValidationError("purpose must not be blank")
+        if detail_level not in DETAIL_LEVELS:
+            raise MontaukValidationError(
+                f"detail_level must be one of {DETAIL_LEVELS}, got {detail_level!r}"
+            )
+        rcfg = ctx.retrieval_config
+        if max_tokens is not None:
+            if not (rcfg.min_tokens <= max_tokens <= rcfg.max_tokens):
+                raise MontaukValidationError(
+                    f"max_tokens must be within [{rcfg.min_tokens}, {rcfg.max_tokens}]"
+                )
+            budget = max_tokens
+        else:
+            budget = rcfg.budget_for(detail_level)
+
+        person = _load_person_or_error(store, person_id)
+
+        semantic_index = ctx.semantic_index
+        stale_reason = ctx.semantic_stale_reason
+        if semantic_index is not None and stale_reason is None:
+            try:
+                on_disk = compute_content_hash(store.person_path(person.id))
+                indexed = semantic_index.person_content_hash(person.id)
+                if indexed is not None and indexed != on_disk:
+                    stale_reason = (
+                        "semantic index for this person is behind the canonical record; "
+                        "lexical results only until reindexed"
+                    )
+            except OSError:
+                pass
+
+        result = build_person_context(
+            person,
+            purpose,
+            detail_level=detail_level,
+            budget_tokens=budget,
+            semantic_index=semantic_index if rcfg.semantic_enabled else None,
+            semantic_stale_reason=stale_reason,
+            lexical_enabled=rcfg.lexical_enabled,
+        )
+        return PersonContextResponse.model_validate(result.to_payload())
 
     @server.tool(
         description=(

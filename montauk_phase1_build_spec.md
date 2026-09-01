@@ -464,6 +464,18 @@ Semantic search is a Phase 1 feature because vague identity recall is a core use
 
 - Similarity threshold and result limit use server defaults in Phase 1; they may be configurable in YAML for administrators.
 
+### 19.1 Indexable units and interaction chunking
+
+The derived index holds one entry per semantic unit: the current person summary, each individual fact, each relationship (a fact carrying a `related_person_id` -- indexed as its own fact chunk), and each interaction summary. A long interaction summary is split at sentence boundaries into overlapping chunks (`interaction_chunk_tokens` / `interaction_chunk_overlap_tokens`); short ones stay whole; facts and the person summary are never split. Every chunk of an interaction references the same canonical `interaction_id` and records its position (`chunk_index` / `chunk_total`). A whole person file is never embedded as one vector.
+
+Each chunk carries enough internal metadata to fetch its canonical source (person_id, record type, record id, chunk position, content hash, embedding model/version). This is internal index metadata; it is not returned to clients.
+
+### 19.2 Index lifecycle
+
+- After every successful mutation that can affect retrieval (create/rename/summary/fact/relationship/interaction add-update-remove, participant correction, archive/restore), the affected index entries are synchronously updated or removed before the mutation is reported fully successful. Unchanged content hashes skip re-embedding.
+- Canonical Markdown is written first (Appendix B). If the derived-index update then fails, the mutation still succeeds and reports `index_update_status: degraded`; retrieval detects the per-person hash mismatch and serves lexical-only for that person until it is reindexed. Known-stale semantic results are never served as current.
+- Startup validates schema version, embedding model/dimension fingerprint, chunking-config fingerprint, and per-person content hashes; it removes orphaned entries and re-embeds changed people. A fingerprint mismatch with the **local** provider triggers an automatic rebuild; with a provider whose rebuild is an externally billed operation it degrades to lexical-only and reports that `montauk rebuild-index` is required.
+
 ## 20. Embedding Provider Interface
 
 Define an implementation-neutral provider interface and ship one lightweight local embedding implementation as the default. Hosted/API providers may be added as optional adapters.
@@ -477,7 +489,9 @@ class EmbeddingProvider(Protocol):
 
 - Default should run locally on CPU without requiring an API token.
 
-- Relationship text should not leave the machine in the default configuration.
+- The provider interface exposes provider identity, model identity, dimension, batch embedding, and (implicitly) failure reporting.
+
+- **Privacy:** the default installation sends no person records, facts, relationships, or interactions to a hosted provider. A hosted provider may be used only after an explicit provider selection in config **and** explicit enablement -- finding an API key in the environment is not authorization. There is no silent local-to-hosted fallback. Raw personal text is not logged to diagnose embedding requests; credentials never appear in person files, shareable indexes, logs, or tool output. If the configured semantic provider is unavailable, retrieval continues lexically and reports `semantic_available: false` with a short reason; the request is not failed.
 
 - Model/provider changes trigger vector-index rebuild.
 
@@ -499,6 +513,21 @@ The MCP API must support both narrow and broad reads.
 | archive reads | Explicitly inspect archived records. |
 | validation errors | Let agents inspect skipped/malformed records. |
 | health/status | Operational state without exposing sensitive person content. |
+| purpose-specific context | Return the evidence from one person's record relevant to a stated question/task, within a token budget. |
+
+### 21.1 Purpose-Specific Person Context
+
+`prepare_person_context(person_id, purpose, detail_level="standard", max_tokens=null)` returns a compact, purpose-specific **evidence packet** -- selected canonical memory, substantially verbatim -- not a complete context dump and not a generated answer. Montauk selects; the calling agent interprets, advises, researches, and judges.
+
+- **Progressive disclosure:** resolve the person (`search_people`) -> `prepare_person_context` with the purpose -> fetch specific cited records (`get_facts` / `get_interactions`) or the whole file (`get_full_record`, for review/export/maintenance) only when more is needed.
+- **Hybrid retrieval:** lexical ranking (BM25 over an ephemeral per-person full-text index -- always available, never stale) combined, when the semantic index is up, with vector similarity, plus deterministic signals: record type, section, recency (only for temporal purposes), exact name/quotation/date/place hits, and duplicate suppression. Search never crosses people once `person_id` is resolved. Ranking weights are a separate, testable component -- not buried in the MCP handler. Raw scores are never presented as calibrated probabilities.
+- **Selection & diversification:** exact duplicates removed; near-duplicate facts collapsed (canonical text never merged or rewritten); a broad briefing diversified across identity / relationship / interests / history / recent interactions.
+- **Output budget:** `brief` ~750, `standard` ~2,000, `comprehensive` ~6,000 tokens of selected evidence text; explicit `max_tokens` overrides within `[retrieval.min_tokens, retrieval.max_tokens]`. Token counts use a conservative over-estimating heuristic (Montauk has no bundled tokenizer). The budget governs the evidence content, not the small response envelope. Over-budget matches are dropped and reported: `truncated: true` with `additional_matching_items`.
+- **Response:** `person {id,name}`, `purpose`, `detail_level`, optional `summary {id,text}`, `facts[]` / `relationships[]` (`id`, `text`, plus `related_person_id`, `section`, `date`, and `confidence` only when materially relevant -- default `high` confidence and all storage/index metadata are omitted), `interactions[]` (`id`, `text`, conditional `date` / `channel`), `retrieval {semantic_available, truncated, returned_items, additional_matching_items, approximate_tokens, budget_tokens, note?}`, and an optional `temporal` block (objective elapsed time only -- `last_recorded_interaction`, `days_since_last_recorded_interaction` when the supporting date is full-precision, and the supporting interaction id; never a subjective verdict).
+- **Honesty about gaps:** if a specific detail is not stored, the packet simply omits it (e.g. "she has dogs" with no dog name). Montauk generates no advice, recommendations, compatibility judgments, quotations, or missing facts.
+- **Lexical-only fallback** is a supported operating mode (no provider configured, model won't load, provider disabled/unavailable, index rebuilding): retrieval still works and `semantic_available` is `false` with a short structured reason.
+
+This first implementation uses hybrid retrieval returning canonical content substantially verbatim. LLM summarization / generative compression and autonomous memory curation are explicit non-goals; the `prepare_person_context` contract is designed so they can be added later without changing it.
 
 ## 22. Identity Resolution
 
@@ -554,12 +583,13 @@ Exact MCP naming can be adjusted to current SDK conventions, but the Phase 1 cap
 Every registered MCP tool must be self-describing. Its name, description, input schema, and output schema should give a newly connected model enough local information to decide when and how to call it. Tool descriptions should state important preconditions and ambiguity behavior, not merely restate the function name.
 
 ```text
-# Identity / search
+# Identity / search / context
 search_people(query)
 get_person(person_id)
-get_full_record(person_id)
+prepare_person_context(person_id, purpose, detail_level="standard", max_tokens=None)
 get_facts(person_id, category=None)
 get_interactions(person_id, ...)
+get_full_record(person_id)              # explicit review / export / maintenance only
 get_upcoming_birthdays(...)
 list_overdue_contacts(...)
 
@@ -641,8 +671,10 @@ RECORD SCOPING
 - Omit unrelated surrounding context. If relevance is uncertain, omit the reference or ask the user to clarify.
 
 RETRIEVAL
-- Prefer targeted retrieval for a specific question.
-- Request the full record only when the complete record is useful.
+- Resolve the person first, then use prepare_person_context with the actual question or task as `purpose` to get a bounded set of relevant facts, relationships, and interactions.
+- Treat the result as evidence from stored memory, not as Montauk's advice or a generated answer. Montauk does not give advice, recommendations, compatibility judgments, or quotations -- the calling assistant does.
+- If the response is truncated or lacks an exact detail, narrow the purpose or retrieve the cited records. Do not invent names, quotations, dates, or facts.
+- Retrieve a complete raw record only for explicit review, export, or maintenance.
 
 CORRECTIONS
 - Correct or remove information that is discovered to be wrong. Do not preserve misinformation as an active superseded fact solely for history; Git provides edit history.
@@ -855,8 +887,8 @@ Provide a small administration CLI. It is not a person-record editor.
 montauk validate
 montauk status
 montauk migrate-ids                       # one-time cutover: name-derived IDs -> generic P0001 IDs
-montauk rebuild-index
-montauk rebuild-vectors
+montauk rebuild-index                     # rebuild both derived indexes; --relational-only / --semantic-only / --model
+montauk index-status                      # index versions, provider/model, counts, stale/orphaned entries, retrieval mode
 montauk git-snapshot
 montauk agents list
 montauk agents create --role read_only --name briefing-agent
@@ -865,6 +897,8 @@ montauk config-check
 ```
 
 Person content is changed through MCP operations or direct Markdown editing.
+
+`montauk rebuild-index` delete-and-rebuilds the derived SQLite (relational) and semantic (vector) indexes from canonical Markdown -- both by default, or one via `--relational-only` / `--semantic-only`. It is safe to rerun, removes orphaned entries, does not corrupt a usable index if a rebuild fails, and prints records processed / entries written / provider+model / elapsed time -- never personal content. (`montauk rebuild-vectors` remains as a hidden deprecated alias for `--semantic-only`.) `montauk index-status` reports index health without personal content.
 
 `montauk migrate-ids` converts an existing deployment whose person IDs are name-derived slugs to generic sequential IDs (`P0001`, ...). It is idempotent, validates the source before writing, takes a pre-migration git snapshot, renames every person file, rewrites every `related_person_id` reference, advances the ID allocator past every migrated ID, verifies that only `^P[0-9]{4,}$` IDs remain with matching filenames and no dangling references, and rebuilds the SQLite index. There is no legacy-ID resolver, `legacy_ids` field, or compatibility period: after the cutover, name-derived IDs fail normal validation like any other malformed ID.
 
@@ -1031,6 +1065,8 @@ montauk/
 - After `montauk migrate-ids`, every existing person and every persisted reference uses a generic ID, name-derived IDs are rejected by normal validation, and no legacy-ID compatibility schema or resolver remains.
 
 - Agents can correct interaction details and participant attribution with `update_interaction`, and remove wholly erroneous or duplicate interactions with `remove_interaction`; a corrected former participant retains no active or searchable trace, while accurate history is protected from removal by server instructions and tool descriptions.
+
+- `prepare_person_context(person_id, purpose, detail_level, max_tokens)` returns a token-bounded, metadata-reduced evidence packet of the facts, relationships, and interactions from one person's record relevant to the purpose, selected with hybrid lexical + semantic retrieval (lexical-only when semantic is unavailable, and it says so); exact terms/quotations/names/places/dates do not depend on vector similarity alone; retrieval never crosses people; canonical Markdown stays authoritative and the index is synchronized after every mutation, validated and rebuildable, and never serves known-stale semantic results; no hosted embedding provider receives personal data by default; truncation and additional matching content are reported honestly; and Montauk generates no advice, judgments, recommendations, quotations, or missing facts -- broad, exact, temporal, and advisory dating-contact fixtures demonstrate this.
 
 ## 38. Phase 2 Opportunities
 

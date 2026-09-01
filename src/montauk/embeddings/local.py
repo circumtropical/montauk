@@ -22,6 +22,10 @@ def _lookup_dimension(model_name: str) -> int:
 
 
 class LocalEmbeddingProvider:
+    #: Provider identity (spec section 20). "local" means embeddings are
+    #: computed on this machine and no relationship data leaves it.
+    provider = "local"
+
     def __init__(self, model_name: str = DEFAULT_MODEL_NAME):
         self.model_name = model_name
         self._dimension = _lookup_dimension(model_name)

@@ -42,7 +42,7 @@ async def test_real_subprocess_stdio_serve_end_to_end(tmp_path):
             assert init_result.instructions
 
             tools = await session.list_tools()
-            assert len(tools.tools) == 26
+            assert len(tools.tools) == 27
 
             # No auth configured (no MONTAUK_AGENT_TOKEN in the child's
             # env), so a mutation must be rejected -- proves auth

@@ -66,6 +66,60 @@ class NameUpdateResult(BaseModel):
     warnings: list[str] = Field(default_factory=list)
 
 
+class ContextPerson(BaseModel):
+    id: str
+    name: str
+
+
+class ContextSummary(BaseModel):
+    id: str
+    text: str
+
+
+class ContextFact(BaseModel):
+    """A selected fact or relationship record, storage metadata stripped."""
+
+    id: str
+    text: str
+    related_person_id: str | None = None
+    section: str | None = None
+    date: str | None = None
+    confidence: str | None = None  # only set when below the default 'high'
+
+
+class ContextInteraction(BaseModel):
+    id: str
+    text: str
+    date: str | None = None
+    channel: str | None = None
+
+
+class ContextRetrieval(BaseModel):
+    semantic_available: bool
+    truncated: bool
+    returned_items: int
+    additional_matching_items: int
+    approximate_tokens: int
+    budget_tokens: int
+    note: str | None = None
+
+
+class PersonContextResponse(BaseModel):
+    """prepare_person_context result: a compact, purpose-specific evidence
+    packet -- selected canonical memory, substantially verbatim, not a
+    generated answer."""
+
+    person: ContextPerson
+    purpose: str
+    detail_level: str
+    summary: ContextSummary | None = None
+    facts: list[ContextFact] = Field(default_factory=list)
+    relationships: list[ContextFact] = Field(default_factory=list)
+    interactions: list[ContextInteraction] = Field(default_factory=list)
+    retrieval: ContextRetrieval
+    temporal: dict | None = None
+
+
 class InteractionMutationResult(BaseModel):
     """Result of update_interaction / remove_interaction."""
 

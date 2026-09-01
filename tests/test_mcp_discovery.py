@@ -35,7 +35,7 @@ class TestToolCatalogCompleteness:
     async def test_every_tool_has_a_name_description_and_object_input_schema(self, tmp_path):
         async with running_session(tmp_path) as (session, _ctx):
             tools = (await session.list_tools()).tools
-            assert len(tools) == 26
+            assert len(tools) == 27
             for tool in tools:
                 assert tool.name
                 assert tool.description and len(tool.description) >= 20, f"{tool.name} description too thin"
@@ -104,6 +104,35 @@ class TestToolCatalogCompleteness:
             tools = {t.name: t for t in (await session.list_tools()).tools}
             description = tools["get_full_record"].description.lower()
             assert "context" in description or "prefer targeted" in description
+            assert "review, export, or maintenance" in description  # progressive disclosure
+
+    @pytest.mark.asyncio
+    async def test_prepare_person_context_description_teaches_progressive_disclosure(self, tmp_path):
+        async with running_session(tmp_path) as (session, _ctx):
+            tools = {t.name: t for t in (await session.list_tools()).tools}
+            d = tools["prepare_person_context"].description.lower()
+            assert "purpose" in d
+            assert "evidence" in d and "not" in d  # evidence, not a generated answer
+            assert "verbatim" in d
+            assert "invent" in d or "do not invent" in d
+            assert "brief" in d and "standard" in d and "comprehensive" in d
+            assert "max_tokens" in d
+            assert "truncat" in d
+            schema = tools["prepare_person_context"].input_schema
+            assert "person_id" in schema.get("required", [])
+            assert "purpose" in schema.get("required", [])
+
+    @pytest.mark.asyncio
+    async def test_prepare_person_context_declares_structured_output(self, tmp_path):
+        async with running_session(tmp_path) as (session, _ctx):
+            tools = {t.name: t for t in (await session.list_tools()).tools}
+            schema = tools["prepare_person_context"].output_schema
+            assert schema is not None and schema.get("type") == "object"
+
+    def test_server_instructions_teach_purpose_specific_retrieval(self):
+        assert "prepare_person_context" in SERVER_INSTRUCTIONS
+        assert "evidence" in SERVER_INSTRUCTIONS.lower()
+        assert "not as Montauk's advice" in SERVER_INSTRUCTIONS or "not Montauk's advice" in SERVER_INSTRUCTIONS
 
     @pytest.mark.asyncio
     async def test_archive_person_description_clarifies_reversibility(self, tmp_path):

@@ -39,7 +39,32 @@ search:
   # known related/unrelated text pairs before trusting the default.
   similarity_threshold: 0.35
 
+retrieval:
+  # Output-content token budgets for prepare_person_context. An explicit
+  # max_tokens argument overrides the preset, clamped to [min, max].
+  # The budget governs the selected evidence text (summary + facts +
+  # relationships + interactions), not the small response envelope.
+  brief_tokens: 750
+  standard_tokens: 2000
+  comprehensive_tokens: 6000
+  min_tokens: 100
+  max_tokens: 8000
+  # Lexical (BM25) retrieval is always available and needs no index.
+  # Semantic retrieval adds vector similarity when the embedding provider
+  # is up; when it isn't, retrieval falls back to lexical and says so.
+  lexical_enabled: true
+  semantic_enabled: true
+  # A long interaction summary is split at sentence boundaries into
+  # overlapping chunks for indexing (facts / the person summary are not).
+  interaction_chunk_tokens: 120
+  interaction_chunk_overlap_tokens: 24
+
 embedding:
+  # Only "local" runs by default: embeddings are computed on this machine
+  # with a small CPU model and NO relationship data leaves the box. A
+  # hosted provider (none ship yet) would require an explicit provider
+  # name here plus enablement -- an API key in the environment is never
+  # on its own authorization to upload personal data.
   provider: local
   model: sentence-transformers/all-MiniLM-L6-v2
 

@@ -55,13 +55,38 @@ class TestRebuildIndex:
         assert index.get_row("P0001") is not None
 
 
-class TestRebuildVectors:
-    def test_rebuilds_and_reports_chunk_count(self, tmp_path):
+class TestRebuildIndex:
+    def test_rebuilds_both_indexes_and_reports_counts(self, tmp_path):
+        store = MarkdownStore(tmp_path / "data")
+        store.write_person(Person(id="P0001", name="Homer Simpson", summary="Works at the plant."))
+        result = runner.invoke(app, ["rebuild-index", *_data_dir_args(tmp_path)])
+        assert result.exit_code == 0
+        assert "1 people indexed" in result.stdout
+        assert "1 chunks" in result.stdout
+
+    def test_semantic_only(self, tmp_path):
+        store = MarkdownStore(tmp_path / "data")
+        store.write_person(Person(id="P0001", name="Homer Simpson", summary="Works at the plant."))
+        result = runner.invoke(app, ["rebuild-index", "--semantic-only", *_data_dir_args(tmp_path)])
+        assert result.exit_code == 0
+        assert "chunks" in result.stdout
+        assert "people indexed" not in result.stdout
+
+    def test_deprecated_rebuild_vectors_alias_still_works(self, tmp_path):
         store = MarkdownStore(tmp_path / "data")
         store.write_person(Person(id="P0001", name="Homer Simpson", summary="Works at the plant."))
         result = runner.invoke(app, ["rebuild-vectors", *_data_dir_args(tmp_path)])
         assert result.exit_code == 0
         assert "1 chunks" in result.stdout
+
+    def test_index_status_reports_hybrid_mode(self, tmp_path):
+        store = MarkdownStore(tmp_path / "data")
+        store.write_person(Person(id="P0001", name="Homer Simpson", summary="Works at the plant."))
+        runner.invoke(app, ["rebuild-index", *_data_dir_args(tmp_path)])
+        result = runner.invoke(app, ["index-status", *_data_dir_args(tmp_path)])
+        assert result.exit_code == 0
+        assert "retrieval mode: hybrid" in result.stdout
+        assert "Homer" not in result.stdout  # no personal content
 
 
 class TestGitSnapshot:

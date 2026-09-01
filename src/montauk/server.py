@@ -46,8 +46,11 @@ RECORD SCOPING
 - Omit unrelated surrounding context. If relevance is uncertain, omit the reference or ask the user to clarify.
 
 RETRIEVAL
-- Prefer targeted retrieval for a specific question.
-- Request the full record only when the complete record is useful.
+- Resolve the person first (search_people), then use prepare_person_context with the actual question or task as `purpose` to get a bounded set of relevant facts, relationships, and interactions.
+- Treat that result as evidence from stored memory, not as Montauk's advice or a generated answer. Montauk does not give advice, recommendations, compatibility judgments, or quotations -- you do.
+- If the response is truncated or lacks an exact detail, narrow the purpose or retrieve the cited records with get_facts / get_interactions.
+- Retrieve a complete raw record (get_full_record) only for explicit review, export, or maintenance.
+- Do not invent names, quotations, dates, or facts that the evidence does not contain.
 
 CORRECTIONS
 - Correct or remove information that is discovered to be wrong. Do not preserve misinformation as an active superseded fact solely for history; Git provides edit history.

@@ -11,7 +11,7 @@ from typing import Literal
 from urllib.parse import urlsplit
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .embeddings.local import DEFAULT_MODEL_NAME
 
@@ -63,8 +63,59 @@ class SearchConfig(BaseModel):
 class EmbeddingConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    # Only "local" runs by default. A hosted provider must be named here
+    # explicitly AND enabled -- an API key in the environment is never on
+    # its own sufficient authorization to upload relationship data.
     provider: Literal["local"] = "local"
     model: str = DEFAULT_MODEL_NAME
+
+
+class RetrievalConfig(BaseModel):
+    """Purpose-specific context retrieval (prepare_person_context)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    brief_tokens: int = 750
+    standard_tokens: int = 2000
+    comprehensive_tokens: int = 6000
+    min_tokens: int = 100
+    max_tokens: int = 8000
+    lexical_enabled: bool = True
+    semantic_enabled: bool = True
+    # Interaction summaries longer than this (estimated tokens) are split
+    # into overlapping chunks at sentence boundaries for indexing; shorter
+    # ones stay whole. Facts and the person summary are never split.
+    interaction_chunk_tokens: int = 120
+    interaction_chunk_overlap_tokens: int = 24
+
+    @field_validator("min_tokens", "max_tokens", "brief_tokens", "standard_tokens", "comprehensive_tokens")
+    @classmethod
+    def _positive(cls, v: int) -> int:
+        if v <= 0:
+            raise ValueError("retrieval token budgets must be positive")
+        return v
+
+    @model_validator(mode="after")
+    def _coherent_bounds(self) -> RetrievalConfig:
+        if self.min_tokens >= self.max_tokens:
+            raise ValueError("retrieval.min_tokens must be below retrieval.max_tokens")
+        for name in ("brief_tokens", "standard_tokens", "comprehensive_tokens"):
+            v = getattr(self, name)
+            if not (self.min_tokens <= v <= self.max_tokens):
+                raise ValueError(f"retrieval.{name} ({v}) must be within [min_tokens, max_tokens]")
+        if self.interaction_chunk_overlap_tokens >= self.interaction_chunk_tokens:
+            raise ValueError("retrieval.interaction_chunk_overlap_tokens must be below interaction_chunk_tokens")
+        return self
+
+    def budget_for(self, detail_level: str) -> int:
+        return {
+            "brief": self.brief_tokens,
+            "standard": self.standard_tokens,
+            "comprehensive": self.comprehensive_tokens,
+        }[detail_level]
+
+    def chunk_fingerprint(self) -> str:
+        return f"iact:{self.interaction_chunk_tokens}/{self.interaction_chunk_overlap_tokens}"
 
 
 class LoggingConfig(BaseModel):
@@ -81,6 +132,7 @@ class MontaukConfig(BaseModel):
     transport: TransportConfig = Field(default_factory=TransportConfig)
     git: GitConfig = Field(default_factory=GitConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
+    retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
     embedding: EmbeddingConfig = Field(default_factory=EmbeddingConfig)
     logging: LoggingConfig = Field(default_factory=LoggingConfig)
 

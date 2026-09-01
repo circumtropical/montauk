@@ -77,7 +77,18 @@ search:
   max_candidates: 5
   similarity_threshold: 0.35
 
+retrieval:
+  # prepare_person_context output-content token budgets.
+  brief_tokens: 750
+  standard_tokens: 2000
+  comprehensive_tokens: 6000
+  min_tokens: 100
+  max_tokens: 8000
+  lexical_enabled: true
+  semantic_enabled: true
+
 embedding:
+  # "local" only: embeddings computed on this machine, no data leaves it.
   provider: local
   model: {model}
 
@@ -110,10 +121,9 @@ vector indexes, rebuilt on demand), `auth/` (agent credentials -- secret),
 
 The derived indexes are disposable. After cloning this repository:
 
-    montauk rebuild-index   --data-dir .
-    montauk rebuild-vectors --data-dir .
+    montauk rebuild-index --data-dir .
 
-regenerates them from the Markdown files.
+regenerates both the relational and semantic indexes from the Markdown files.
 """
 
 
@@ -253,41 +263,136 @@ def migrate_ids(config: Path | None = ConfigOption, data_dir: Path | None = Data
 
     sqlite_index = SqliteIndex(cfg.data_dir_path / "index" / "relationships.sqlite")
     sqlite_index.rebuild_from_scan(store, scan_people_directory(store))
-    typer.echo("rebuilt SQLite index; run `montauk rebuild-vectors` to rebuild the semantic index")
+    typer.echo("rebuilt SQLite index; run `montauk rebuild-index --semantic-only` for the semantic index")
     if not report.verified:
         typer.echo("WARNING: post-migration verification did not pass", err=True)
         raise typer.Exit(code=1)
 
 
-@app.command(name="rebuild-index")
-def rebuild_index(config: Path | None = ConfigOption, data_dir: Path | None = DataDirOption) -> None:
-    """Delete-and-rebuild the derived SQLite index from canonical Markdown."""
-    cfg = _resolve_config(config, data_dir)
+def _content_hashes(store: MarkdownStore, result) -> dict[str, str]:
+    from .sqlite_index import compute_content_hash
+
+    hashes: dict[str, str] = {}
+    for person_id in result.valid:
+        try:
+            hashes[person_id] = compute_content_hash(store.person_path(person_id))
+        except OSError:
+            continue
+    return hashes
+
+
+def _rebuild_indexes(cfg: MontaukConfig, *, relational: bool, semantic: bool, model: str | None) -> None:
+    import time
+
     store = MarkdownStore(cfg.data_dir_path)
     store.sync_id_sequence()
     result = scan_people_directory(store)
-    sqlite_index = SqliteIndex(cfg.data_dir_path / "index" / "relationships.sqlite")
-    sqlite_index.rebuild_from_scan(store, result)
-    typer.echo(f"rebuilt index: {len(result.valid)} people indexed")
+    write_validation_report(result, store.data_dir)
+
+    if relational:
+        started = time.monotonic()
+        sqlite_index = SqliteIndex(cfg.data_dir_path / "index" / "relationships.sqlite")
+        sqlite_index.rebuild_from_scan(store, result)
+        typer.echo(f"relational: {len(result.valid)} people indexed in {time.monotonic() - started:.2f}s")
+
+    if semantic:
+        if not cfg.retrieval.semantic_enabled:
+            typer.echo("semantic: retrieval.semantic_enabled is false; skipped")
+            return
+        from .embeddings.local import LocalEmbeddingProvider
+        from .semantic_index import SemanticIndex
+
+        started = time.monotonic()
+        provider = LocalEmbeddingProvider(model_name=model or cfg.embedding.model)
+        semantic_index = SemanticIndex(
+            cfg.data_dir_path / "index" / "vectors",
+            provider,
+            interaction_chunk_tokens=cfg.retrieval.interaction_chunk_tokens,
+            interaction_chunk_overlap_tokens=cfg.retrieval.interaction_chunk_overlap_tokens,
+        )
+        before = semantic_index.chunk_count()
+        semantic_index.rebuild_from_scan(result, content_hashes=_content_hashes(store, result))
+        after = semantic_index.chunk_count()
+        typer.echo(
+            f"semantic: {len(result.valid)} people, {after} chunks "
+            f"({after - before:+d}) via {provider.model_name} in {time.monotonic() - started:.2f}s"
+        )
 
 
-@app.command(name="rebuild-vectors")
+@app.command(name="rebuild-index")
+def rebuild_index(
+    config: Path | None = ConfigOption,
+    data_dir: Path | None = DataDirOption,
+    relational_only: bool = typer.Option(False, "--relational-only", help="Rebuild only the SQLite index."),
+    semantic_only: bool = typer.Option(False, "--semantic-only", help="Rebuild only the semantic/vector index."),
+    model: str | None = typer.Option(None, "--model", help="Override the configured embedding model."),
+) -> None:
+    """Delete-and-rebuild the derived indexes from canonical Markdown. By
+    default rebuilds both the SQLite (relational) and semantic (vector)
+    indexes. Safe to rerun; removes orphaned entries; canonical Markdown
+    is never touched. Prints counts, model, and timing -- not personal
+    content."""
+    if relational_only and semantic_only:
+        typer.echo("error: pass at most one of --relational-only / --semantic-only", err=True)
+        raise typer.Exit(code=1)
+    cfg = _resolve_config(config, data_dir)
+    _rebuild_indexes(
+        cfg, relational=not semantic_only, semantic=not relational_only, model=model
+    )
+
+
+@app.command(name="rebuild-vectors", hidden=True)
 def rebuild_vectors(
     config: Path | None = ConfigOption,
     data_dir: Path | None = DataDirOption,
-    model: str | None = typer.Option(None, "--model", help="Override the configured embedding model."),
+    model: str | None = typer.Option(None, "--model"),
 ) -> None:
-    """Delete-and-rebuild the derived semantic/vector index from canonical Markdown."""
-    from .embeddings.local import LocalEmbeddingProvider
-    from .semantic_index import SemanticIndex
+    """Deprecated alias for `rebuild-index --semantic-only`."""
+    _rebuild_indexes(_resolve_config(config, data_dir), relational=False, semantic=True, model=model)
 
+
+@app.command(name="index-status")
+def index_status(config: Path | None = ConfigOption, data_dir: Path | None = DataDirOption) -> None:
+    """Report derived-index health (versions, provider/model, counts,
+    stale/orphaned entries, retrieval mode) without printing personal
+    content."""
     cfg = _resolve_config(config, data_dir)
     store = MarkdownStore(cfg.data_dir_path)
-    provider = LocalEmbeddingProvider(model_name=model or cfg.embedding.model)
-    semantic_index = SemanticIndex(cfg.data_dir_path / "index" / "vectors", provider)
     result = scan_people_directory(store)
-    semantic_index.rebuild_from_scan(result)
-    typer.echo(f"rebuilt vector index: {semantic_index.chunk_count()} chunks")
+    active = set(result.valid)
+
+    sqlite_index = SqliteIndex(cfg.data_dir_path / "index" / "relationships.sqlite")
+    typer.echo(f"canonical people (valid): {len(active)}")
+    typer.echo(f"relational rows: {len(sqlite_index.all_person_ids())}")
+    typer.echo(f"last_reconciliation_at: {sqlite_index.get_meta('last_reconciliation_at')}")
+
+    if not cfg.retrieval.semantic_enabled:
+        typer.echo("semantic: disabled (retrieval.semantic_enabled=false) -> lexical-only retrieval")
+        return
+    try:
+        from .embeddings.local import LocalEmbeddingProvider
+        from .semantic_index import SemanticIndex
+
+        provider = LocalEmbeddingProvider(model_name=cfg.embedding.model)
+        semantic_index = SemanticIndex(
+            cfg.data_dir_path / "index" / "vectors",
+            provider,
+            interaction_chunk_tokens=cfg.retrieval.interaction_chunk_tokens,
+            interaction_chunk_overlap_tokens=cfg.retrieval.interaction_chunk_overlap_tokens,
+        )
+    except Exception as exc:  # noqa: BLE001
+        typer.echo(f"semantic: provider unavailable ({type(exc).__name__}) -> lexical-only retrieval")
+        return
+
+    state = semantic_index.index_state(active_person_ids=active)
+    for key in ("schema_version", "model_name", "dimension", "chunk_fingerprint", "chunk_count", "person_count", "vector_rows"):
+        typer.echo(f"semantic.{key}: {state[key]}")
+    typer.echo(f"semantic.orphan_person_ids: {state.get('orphan_person_ids') or 'none'}")
+    if state["stale_reason"]:
+        typer.echo(f"semantic.stale: {state['stale_reason']}  -> run `montauk rebuild-index`")
+        typer.echo("retrieval mode: lexical-only until rebuilt")
+    else:
+        typer.echo("retrieval mode: hybrid (lexical + semantic)")
 
 
 @app.command(name="git-snapshot")
@@ -359,7 +464,12 @@ def config_check(config: Path = typer.Option(..., "--config", help="Path to a YA
         typer.echo(f"transport.public_url: {cfg.transport.public_url}")
     typer.echo(f"git.enabled: {cfg.git.enabled} (daily at {cfg.git.daily_snapshot_time})")
     typer.echo(f"search.semantic_enabled: {cfg.search.semantic_enabled}")
-    typer.echo(f"embedding: {cfg.embedding.provider}/{cfg.embedding.model}")
+    typer.echo(
+        f"retrieval: budgets {cfg.retrieval.brief_tokens}/{cfg.retrieval.standard_tokens}/"
+        f"{cfg.retrieval.comprehensive_tokens} (bounds {cfg.retrieval.min_tokens}-{cfg.retrieval.max_tokens}), "
+        f"lexical={cfg.retrieval.lexical_enabled} semantic={cfg.retrieval.semantic_enabled}"
+    )
+    typer.echo(f"embedding: {cfg.embedding.provider}/{cfg.embedding.model} (local-only; no data leaves the box)")
     typer.echo(f"logging: level={cfg.logging.level}, retain {cfg.logging.retention_days} days")
     typer.echo("config OK")
 

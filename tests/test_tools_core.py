@@ -14,6 +14,7 @@ CORE_TOOL_NAMES = {
     "search_people",
     "get_person",
     "get_full_record",
+    "prepare_person_context",
     "get_facts",
     "get_interactions",
     "create_person",
