@@ -1,4 +1,12 @@
-"""Person, fact, and interaction ID generation (spec section 7, 10, 12)."""
+"""Person, fact, and interaction ID generation (spec sections 7, 10, 12).
+
+Person IDs are permanent, generic, sequential identifiers (``P0001``,
+``P0002``, ...). They are assigned by Montauk, never derived from a
+person's name, and never reused -- see :class:`montauk.markdown_store.PersonIdSequence`
+for the concurrency-safe high-water-mark allocator. This module only
+holds the pure format helpers; the allocator needs filesystem access and
+lives with the canonical store.
+"""
 
 from __future__ import annotations
 
@@ -8,29 +16,44 @@ from collections.abc import Iterable
 _SLUG_INVALID_RE = re.compile(r"[^a-z0-9]+")
 _LOCAL_ID_RE_TEMPLATE = r"^{prefix}-(\d+)$"
 
-PERSON_ID_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+# Canonical generic person ID: uppercase P followed by at least four
+# digits, zero-padded. Continues naturally past P9999 (P10000, ...).
+PERSON_ID_RE = re.compile(r"^P[0-9]{4,}$")
+
+_PERSON_ID_MIN_DIGITS = 4
+
+
+def format_person_id(n: int) -> str:
+    """Render sequence number ``n`` (1-based) as a canonical person ID."""
+    if n < 1:
+        raise ValueError(f"person id sequence number must be >= 1, got {n}")
+    return f"P{n:0{_PERSON_ID_MIN_DIGITS}d}"
+
+
+def person_id_number(person_id: str) -> int | None:
+    """Inverse of :func:`format_person_id`: the integer inside a canonical
+    person ID, or ``None`` if ``person_id`` is not canonical."""
+    if not PERSON_ID_RE.match(person_id):
+        return None
+    return int(person_id[1:])
 
 
 def slugify(name: str) -> str:
-    """Derive a lowercase, hyphenated slug from a display name."""
+    """Derive a lowercase, hyphenated slug from a display name. Still used
+    for *agent* credential IDs (auth.py); person IDs are generic and never
+    name-derived (see :func:`format_person_id`)."""
     slug = _SLUG_INVALID_RE.sub("-", name.strip().lower()).strip("-")
     if not slug:
         raise ValueError(f"cannot derive a slug from name: {name!r}")
     return slug
 
 
-def next_person_id(name: str, existing_ids: Iterable[str]) -> str:
-    """Assign a permanent person ID: the bare slug if free, otherwise the
-    lowest available numeric suffix (spec section 7: mike-chen, mike-chen-2, ...).
-    """
-    base = slugify(name)
-    existing = set(existing_ids)
-    if base not in existing:
-        return base
-    suffix = 2
-    while f"{base}-{suffix}" in existing:
-        suffix += 1
-    return f"{base}-{suffix}"
+def normalize_alias(value: str) -> str:
+    """Fold an alias/name to its comparison key: trimmed, internal
+    whitespace collapsed, case-insensitive. Used for alias de-duplication
+    and lookup only -- the human-readable spelling is always stored as
+    given."""
+    return " ".join(value.split()).casefold()
 
 
 def _next_local_id(prefix: str, existing_ids: Iterable[str]) -> str:

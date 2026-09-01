@@ -12,6 +12,7 @@ needed here.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import uuid
@@ -20,6 +21,7 @@ from typing import Any
 
 import yaml
 
+from .ids import format_person_id, person_id_number
 from .models import Fact, Interaction, Person
 from .schema import CATEGORIES
 
@@ -296,6 +298,63 @@ def atomic_write_text(path: Path, content: str) -> None:
 # --- store -----------------------------------------------------------------
 
 
+class PersonIdSequence:
+    """Concurrency-safe monotonic allocator for generic person IDs
+    (``P0001``, ``P0002``, ...).
+
+    The next number is read from a small canonical JSON file
+    (``person-id-sequence.json``) at the deployment root, incremented, and
+    written back atomically *before* the new person's Markdown file is
+    written -- so a failed creation leaves a harmless gap and never lets an
+    already-issued ID be handed out again. All writes go through
+    WriteQueue's single serialized lock, so there is exactly one writer.
+
+    The file is canonical state (git-tracked), not a derived index: it is
+    never rebuilt from the Markdown files, only self-healed *upward* on
+    startup to cover any IDs added by hand.
+    """
+
+    FILENAME = "person-id-sequence.json"
+
+    def __init__(self, data_dir: Path | str):
+        self.path = Path(data_dir) / self.FILENAME
+
+    def _read(self) -> int:
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            value = int(data["last_allocated"])
+            return max(value, 0)
+        except (OSError, ValueError, KeyError, TypeError):
+            return 0
+
+    def _write(self, value: int) -> None:
+        atomic_write_text(self.path, json.dumps({"last_allocated": value}, indent=2) + "\n")
+
+    def high_water(self) -> int:
+        return self._read()
+
+    def initialize(self) -> None:
+        """Create the sequence file at zero if it does not exist yet.
+        Idempotent: never overwrites an existing count."""
+        if not self.path.exists():
+            self._write(0)
+
+    def allocate(self) -> str:
+        """Return the next unused canonical person ID, persisting the
+        advance before returning."""
+        next_value = self._read() + 1
+        self._write(next_value)
+        return format_person_id(next_value)
+
+    def ensure_at_least(self, value: int) -> bool:
+        """Raise the high-water mark to ``value`` if it is currently lower.
+        Returns True if the file was advanced. Never lowers it."""
+        if value > self._read():
+            self._write(value)
+            return True
+        return False
+
+
 class MarkdownStore:
     """Canonical read/write access to a deployment's people/ and archive/
     Markdown directories."""
@@ -306,6 +365,7 @@ class MarkdownStore:
         self.archive_dir = self.data_dir / "archive"
         self.people_dir.mkdir(parents=True, exist_ok=True)
         self.archive_dir.mkdir(parents=True, exist_ok=True)
+        self.id_sequence = PersonIdSequence(self.data_dir)
 
     def person_path(self, person_id: str) -> Path:
         return self.people_dir / f"{person_id}.md"
@@ -358,3 +418,19 @@ class MarkdownStore:
         if not src.exists():
             raise PersonNotFoundError(person_id, archived=True)
         os.rename(src, self.person_path(person_id))
+
+    def allocate_person_id(self) -> str:
+        """Assign the next permanent generic person ID (``P0001``, ...).
+        Must be called from inside the serialized write path."""
+        return self.id_sequence.allocate()
+
+    def sync_id_sequence(self) -> bool:
+        """Self-heal the ID high-water mark: never assign an ID at or below
+        one already present on disk (e.g. a person file added by hand).
+        Returns True if the sequence was advanced. Only ever raises it."""
+        highest = 0
+        for stem in (*self.list_person_ids(), *self.list_archived_person_ids()):
+            n = person_id_number(stem)
+            if n is not None:
+                highest = max(highest, n)
+        return self.id_sequence.ensure_at_least(highest)

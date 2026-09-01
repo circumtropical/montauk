@@ -13,7 +13,7 @@ from montauk.markdown_store import (
 from montauk.models import ContactInfo, Fact, Interaction, Person
 
 SPEC_EXAMPLE = """---
-id: mike-chen-2
+id: P0001
 name: Mike Chen
 aliases:
   - Michael Chen
@@ -85,8 +85,8 @@ SIMPSONS_DIR = Path(__file__).parent.parent / "examples" / "simpsons"
 
 class TestSpecExampleRoundTrip:
     def test_parses_spec_example(self):
-        person = markdown_to_person(SPEC_EXAMPLE, source_path="mike-chen-2.md")
-        assert person.id == "mike-chen-2"
+        person = markdown_to_person(SPEC_EXAMPLE, source_path="P0001.md")
+        assert person.id == "P0001"
         assert person.name == "Mike Chen"
         assert person.aliases == ["Michael Chen"]
         assert person.birthday.to_string() == "1982-04-17"
@@ -108,7 +108,7 @@ class TestSpecExampleRoundTrip:
         assert i.sources[0].type == "agent" and i.sources[0].id == "personal-assistant"
 
     def test_round_trip_is_semantically_stable(self):
-        person = markdown_to_person(SPEC_EXAMPLE, source_path="mike-chen-2.md")
+        person = markdown_to_person(SPEC_EXAMPLE, source_path="P0001.md")
         regenerated_text = person_to_markdown(person)
         person2 = markdown_to_person(regenerated_text, source_path="round-trip.md")
         assert person == person2
@@ -119,7 +119,7 @@ class TestSpecExampleRoundTrip:
         # regeneration of an unchanged Person must be byte-identical --
         # this is what keeps content-hash-based index reconciliation and
         # diff-based Git snapshots from seeing spurious "changes".
-        person = markdown_to_person(SPEC_EXAMPLE, source_path="mike-chen-2.md")
+        person = markdown_to_person(SPEC_EXAMPLE, source_path="P0001.md")
         once = person_to_markdown(person)
         twice = person_to_markdown(markdown_to_person(once, source_path="x.md"))
         assert once == twice
@@ -165,11 +165,11 @@ class TestMalformedInput:
 
     def test_unclosed_quote_produces_diagnosable_yaml_error(self):
         # Mirrors the deliberately broken examples/simpsons fixture file.
-        content = (SIMPSONS_DIR / "people" / "barney-gumble.md").read_text()
+        content = (SIMPSONS_DIR / "people" / "P0001.md").read_text()
         with pytest.raises(MarkdownFormatError) as exc_info:
-            markdown_to_person(content, source_path="barney-gumble.md")
+            markdown_to_person(content, source_path="P0001.md")
         message = str(exc_info.value)
-        assert "barney-gumble.md" in message
+        assert "P0001.md" in message
         assert "line" in message  # underlying PyYAML error includes line/column
 
     def test_semantically_invalid_field_raises_pydantic_error_not_format_error(self):
@@ -184,47 +184,42 @@ class TestMalformedInput:
 
 
 class TestSimpsonsFixtureParses:
+    # P0001 barney (malformed), P0002 gil #2, P0003 gil #1, P0004 homer,
+    # P0005 marge, P0006 milhouse, P0007 moe, P0008 ned; archive P0009 frank.
     @pytest.mark.parametrize(
         "filename",
-        [
-            "homer-simpson.md",
-            "marge-simpson.md",
-            "ned-flanders.md",
-            "moe-szyslak.md",
-            "gil-gunderson.md",
-            "gil-gunderson-2.md",
-            "milhouse-van-houten.md",
-        ],
+        ["P0003.md", "P0004.md", "P0005.md", "P0006.md", "P0007.md", "P0008.md"],
     )
     def test_active_person_parses(self, filename):
         content = (SIMPSONS_DIR / "people" / filename).read_text()
         person = markdown_to_person(content, source_path=filename)
-        assert person.id
+        assert person.id.startswith("P")
         assert person.name
 
     def test_archived_person_parses(self):
-        content = (SIMPSONS_DIR / "archive" / "frank-grimes.md").read_text()
-        person = markdown_to_person(content, source_path="frank-grimes.md")
-        assert person.id == "frank-grimes"
+        content = (SIMPSONS_DIR / "archive" / "P0009.md").read_text()
+        person = markdown_to_person(content, source_path="P0009.md")
+        assert person.id == "P0009"
+        assert person.name == "Frank Grimes"
 
     def test_barney_gumble_is_deliberately_malformed(self):
-        content = (SIMPSONS_DIR / "people" / "barney-gumble.md").read_text()
+        content = (SIMPSONS_DIR / "people" / "P0001.md").read_text()
         with pytest.raises(MarkdownFormatError):
-            markdown_to_person(content, source_path="barney-gumble.md")
+            markdown_to_person(content, source_path="P0001.md")
 
     def test_gil_gunderson_pair_share_a_display_name(self):
-        p1 = markdown_to_person((SIMPSONS_DIR / "people" / "gil-gunderson.md").read_text())
-        p2 = markdown_to_person((SIMPSONS_DIR / "people" / "gil-gunderson-2.md").read_text())
+        p1 = markdown_to_person((SIMPSONS_DIR / "people" / "P0003.md").read_text())
+        p2 = markdown_to_person((SIMPSONS_DIR / "people" / "P0002.md").read_text())
         assert p1.name == p2.name == "Gil Gunderson"
         assert p1.id != p2.id
 
     def test_moe_has_cadence_but_no_interactions(self):
-        p = markdown_to_person((SIMPSONS_DIR / "people" / "moe-szyslak.md").read_text())
+        p = markdown_to_person((SIMPSONS_DIR / "people" / "P0007.md").read_text())
         assert p.desired_contact_cadence_days is not None
         assert p.interactions == []
 
     def test_milhouse_is_a_minimal_bare_record(self):
-        p = markdown_to_person((SIMPSONS_DIR / "people" / "milhouse-van-houten.md").read_text())
+        p = markdown_to_person((SIMPSONS_DIR / "people" / "P0006.md").read_text())
         assert p.birthday is None
         assert p.desired_contact_cadence_days is None
         assert p.summary is None
@@ -232,7 +227,7 @@ class TestSimpsonsFixtureParses:
         assert p.interactions == []
 
     def test_ned_flanders_birthday_has_no_year(self):
-        p = markdown_to_person((SIMPSONS_DIR / "people" / "ned-flanders.md").read_text())
+        p = markdown_to_person((SIMPSONS_DIR / "people" / "P0008.md").read_text())
         assert p.birthday.year is None
         assert (p.birthday.month, p.birthday.day) == (5, 11)
 
@@ -242,7 +237,7 @@ class TestMarkdownStore:
         return MarkdownStore(tmp_path / "data")
 
     def _person(self, **overrides) -> Person:
-        defaults = dict(id="lisa-simpson", name="Lisa Simpson")
+        defaults = dict(id="P0001", name="Lisa Simpson")
         defaults.update(overrides)
         return Person(**defaults)
 
@@ -254,8 +249,8 @@ class TestMarkdownStore:
             interactions=[Interaction(id="int-1", date="2026-08-01", summary="Talked about jazz.")],
         )
         store.write_person(person)
-        assert store.exists("lisa-simpson")
-        loaded = store.read_person("lisa-simpson")
+        assert store.exists("P0001")
+        loaded = store.read_person("P0001")
         assert loaded == person
 
     def test_read_missing_person_raises(self, tmp_path):
@@ -265,18 +260,18 @@ class TestMarkdownStore:
 
     def test_list_person_ids(self, tmp_path):
         store = self._store(tmp_path)
-        store.write_person(self._person(id="bart-simpson", name="Bart Simpson"))
-        store.write_person(self._person(id="lisa-simpson", name="Lisa Simpson"))
-        assert store.list_person_ids() == ["bart-simpson", "lisa-simpson"]
+        store.write_person(self._person(id="P0002", name="Bart Simpson"))
+        store.write_person(self._person(id="P0001", name="Lisa Simpson"))
+        assert store.list_person_ids() == ["P0001", "P0002"]
 
     def test_archive_moves_file_out_of_people_dir(self, tmp_path):
         store = self._store(tmp_path)
         store.write_person(self._person())
-        store.archive_person("lisa-simpson")
-        assert not store.exists("lisa-simpson")
-        assert store.is_archived("lisa-simpson")
+        store.archive_person("P0001")
+        assert not store.exists("P0001")
+        assert store.is_archived("P0001")
         assert store.list_person_ids() == []
-        assert store.list_archived_person_ids() == ["lisa-simpson"]
+        assert store.list_archived_person_ids() == ["P0001"]
 
     def test_archive_missing_person_raises(self, tmp_path):
         store = self._store(tmp_path)
@@ -286,16 +281,16 @@ class TestMarkdownStore:
     def test_restore_moves_file_back_to_people_dir(self, tmp_path):
         store = self._store(tmp_path)
         store.write_person(self._person())
-        store.archive_person("lisa-simpson")
-        store.restore_person("lisa-simpson")
-        assert store.exists("lisa-simpson")
-        assert not store.is_archived("lisa-simpson")
+        store.archive_person("P0001")
+        store.restore_person("P0001")
+        assert store.exists("P0001")
+        assert not store.is_archived("P0001")
 
     def test_overwrite_existing_person(self, tmp_path):
         store = self._store(tmp_path)
         store.write_person(self._person(summary="Original summary."))
         store.write_person(self._person(summary="Updated summary."))
-        assert store.read_person("lisa-simpson").summary == "Updated summary."
+        assert store.read_person("P0001").summary == "Updated summary."
 
     def test_write_does_not_leave_temp_files_behind(self, tmp_path):
         store = self._store(tmp_path)
@@ -314,5 +309,5 @@ class TestMarkdownStore:
             )
         )
         store.write_person(person)
-        loaded = store.read_person("lisa-simpson")
+        loaded = store.read_person("P0001")
         assert loaded.contact == person.contact

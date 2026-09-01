@@ -9,8 +9,9 @@ deployment's data_dir is typically outside the source tree entirely
 canonical data actually changed since the last commit; never
 auto-pushes; never commits derived indexes (index/) or credentials
 (auth/) -- both are excluded by a .gitignore this module creates
-alongside the repo, and by only ever `git add`-ing people/ and
-archive/ explicitly (never `-A`/`.`).
+alongside the repo, and by only ever `git add`-ing the canonical paths
+(people/, archive/, and the person-id sequence file) explicitly (never
+`-A`/`.`).
 """
 
 from __future__ import annotations
@@ -27,6 +28,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_DAILY_TIME = dt.time(3, 0)
 DEFAULT_BRANCH = "main"
 
+# Canonical, git-tracked paths (everything else under data_dir is derived
+# or secret). people/ and archive/ hold the Markdown records;
+# person-id-sequence.json is the permanent ID high-water mark.
+CANONICAL_PATHS = ("people", "archive", "person-id-sequence.json")
+
 _DATA_GITIGNORE = (
     "# Derived/disposable indexes and credentials are never snapshotted.\n"
     "index/\n"
@@ -34,6 +40,8 @@ _DATA_GITIGNORE = (
     "logs/\n"
     "validation-report.json\n"
     ".montauk.lock\n"
+    "id-migration-map.json\n"
+    ".montauk-migration-backup-*/\n"
 )
 
 # Automated commits (initial scaffold + daily snapshots) get a clearly
@@ -112,7 +120,7 @@ def snapshot_if_changed(data_dir: Path | str, *, message: str | None = None) -> 
     # Explicit pathspecs (unlike `git add -A`/`.`) error out if a given
     # path doesn't exist at all, which is expected for a brand-new
     # deployment before people/ or archive/ has ever been created.
-    data_pathspecs = [p for p in ("people", "archive") if (data_dir / p).exists()]
+    data_pathspecs = [p for p in CANONICAL_PATHS if (data_dir / p).exists()]
     if not data_pathspecs:
         return False
 

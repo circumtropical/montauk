@@ -109,11 +109,12 @@ montauk-mcp/
     config.example.yaml
   data/                       # deployment data; normally gitignored in public source repo
     people/
-      homer-simpson.md
-      mike-chen.md
-      mike-chen-2.md
+      P0001.md
+      P0002.md
+      P0003.md
     archive/
       ...
+    person-id-sequence.json   # canonical, git-tracked person-ID high-water mark
     index/
       relationships.sqlite
       vectors/                # implementation-specific derived vector data
@@ -134,23 +135,33 @@ A real deployment may place its data directory anywhere via configuration. The p
 
 ## 7. Person Identifiers
 
-Every person has a permanent, human-readable identifier unique only within that deployment. IDs are name-derived slugs, not UUIDs.
+Every person has a permanent, generic, deployment-local identifier. IDs are **not** derived from names; they are sequential and opaque.
 
 ```text
-mike-chen
-mike-chen-2
-sarah-jones
+P0001
+P0002
+P0003
 ```
 
-- The server assigns the lowest available numeric suffix when a slug collision exists.
+- Format: uppercase `P` followed by a zero-padded number, initially four digits, growing naturally past `P9999` (`P10000`, ...). Validate with semantics equivalent to `^P[0-9]{4,}$`.
 
-- Once assigned, the person ID is permanent even if the person's display name later changes.
+- The server assigns the ID. Agents never supply or choose it under normal creation flows.
 
-- Names and filenames are not relied upon as globally unique identifiers.
+- IDs are never based on, and never change with, a person's name.
+
+- IDs are immutable and are never reused -- not after archival, not after deletion, not after a failed creation (gaps are acceptable).
+
+- Allocation is concurrency-safe: a persisted high-water mark (`person-id-sequence.json`) is advanced *before* the new person file is written, under the single serialized write lock. It is canonical, git-tracked state -- never rebuilt from the Markdown files, only self-healed upward on startup to cover any IDs added by hand.
+
+- Canonical filenames are `people/<person_id>.md`. The file is **not** renamed when the person's display name changes.
+
+- Names and filenames are not relied upon as identifiers.
 
 - Relationships and API mutations reference person IDs.
 
 - Identity resolution is separate from mutation: agents search/resolve first, then write using the returned person ID.
+
+> **Identity vs. name.** A person's ID represents their identity and never changes. Their name represents the best information currently known about them and may change without replacing the person record. Never archive and recreate a person merely to correct or complete their name -- use `update_person_name`.
 
 ## 8. Canonical Markdown Person Schema
 
@@ -158,10 +169,11 @@ The exact serialization may evolve during implementation, but Phase 1 should pre
 
 ```text
 ---
-id: mike-chen-2
+id: P0042
 name: Mike Chen
 aliases:
   - Michael Chen
+  - Mike
 birthday: 1982-04-17
 location: "Normally Boston; often vacations in Puerto Rico; last known in New Zealand"
 company: Acme Robotics
@@ -236,9 +248,9 @@ contact:
 
 | Field | Required? | Meaning / Rules |
 | --- | --- | --- |
-| id | Yes | Permanent deployment-local human-readable person ID. |
-| name | Yes | Current display name. |
-| aliases | No | Alternate names/nicknames used for lookup. |
+| id | Yes | Permanent generic deployment-local person ID (`P0001`). Never name-derived; never changes; never reused. |
+| name | Yes | Best currently known display name. Mutable. May be partial, approximate, or misspelled when that is all that is known. Not split into first/last. |
+| aliases | No | Alternate lookup forms: former display names, partial names, alternate spellings, nicknames, known misspellings. Normalized (trim + collapse whitespace + case-fold) for comparison/indexing; the human-readable spelling is preserved for display. De-duplicated under that normalization. The current display name is not stored redundantly as an alias. |
 | birthday | No | Structured birthday; year may be omitted if unknown. |
 | location | No | Loose free-text current/general location description. |
 | company | No | Current company; employment history belongs in facts. |
@@ -291,7 +303,7 @@ Interactions are first-class records even when they produce no new facts. They s
 
 | Field | Required? | Notes |
 | --- | --- | --- |
-| id | Yes | Short person-local ID such as int-42. |
+| id | Yes | Short person-local ID such as int-42, generated and stable. Independent of the interaction's participants and descriptive content: correcting those never changes the id. Does not use the person-ID sequence. |
 | date | Yes | Variable precision date: YYYY-MM-DD, YYYY-MM, or YYYY. |
 | channel | No | Free-form text such as in-person, WhatsApp, phone, email, etc. |
 | connection_level | No | Placeholder integer, initially 1-6. Semantics intentionally undefined in Phase 1. |
@@ -299,6 +311,18 @@ Interactions are first-class records even when they produce no new facts. They s
 | sources | No | Compact provenance references. |
 
 Phase 1 cadence calculations use interaction dates, not connection_level. Future versions may define connection-level semantics.
+
+### 12.1 Correcting Interactions
+
+Correcting inaccurate data is not erasing history. Accurate historical interactions must not be removed merely because they are old, inconvenient, sensitive, or no longer relevant.
+
+- `update_interaction(person_id, interaction_id, ...)` corrects a recorded interaction whose details are wrong. Omitted fields are unchanged; the complete resulting interaction is validated; the `interaction_id` never changes.
+
+- A wrong participant is corrected by moving the interaction: `update_interaction(..., move_to_person_id=...)` allocates a fresh interaction id on the corrected person, removes the interaction entirely from the former person (no tombstone, voided record, or searchable trace), and reindexes both records atomically.
+
+- `remove_interaction(person_id, interaction_id, correction_reason)` is only for a record that is itself erroneous -- it never happened, it was created by mistake, or it duplicates another. A non-empty `correction_reason` is required. The interaction and all references to it are removed from active data and every index, with no voided copy retained. The operational log records only the ids and that a correction occurred, never the erroneous contents (spec section 28).
+
+Choosing the operation: detail wrong but event occurred -> `update_interaction`; wrong person -> `update_interaction` with `move_to_person_id`; record should not exist / is a duplicate -> `remove_interaction`; accurate but old/sensitive/inconvenient -> leave it.
 
 ## 13. Provenance Model
 
@@ -335,6 +359,8 @@ External agents may explicitly submit medium- or low-confidence facts in Phase 1
 - The server does not automatically create, mirror, or reconcile reciprocal relationships.
 
 - Not every spouse, child, or relative must have a separate person record.
+
+- An explicit `related_person_id` must be a canonical generic person ID (`^P[0-9]{4,}$`) that resolves to an existing active or archived person, and must not be the record's own id. A shared or similar display name never makes two records the same person; Montauk does not merge people or reject a write because a name is reused. Moving information between people or merging identities requires explicit user direction (a `merge_people` operation is out of scope for Phase 1).
 
 ### 15.1 Record-Scoped Relevance and Unrelated People
 
@@ -414,6 +440,8 @@ Do not persist 'days since last interaction' as canonical index state. Compute i
 
 8. Publish health state as healthy or degraded.
 
+9. Self-heal the person-ID high-water mark upward to cover any generic ID already present in people/ or archive/ (e.g. a file added by hand). It is only ever raised, never lowered or rebuilt from the files.
+
 Manual Markdown edits are expected to be followed by a server restart. Phase 1 does not need a filesystem watcher.
 
 ## 19. Semantic / Vector Search
@@ -481,13 +509,13 @@ search_people("Mike Chen from Stanford who I met about a year ago")
 
 [
   {
-    "person_id": "mike-chen",
+    "person_id": "P0007",
     "name": "Mike Chen",
     "summary": "MIT classmate; works in robotics",
     "match_evidence": ["Met at MIT alumni mixer in 2025"]
   },
   {
-    "person_id": "mike-chen-2",
+    "person_id": "P0042",
     "name": "Mike Chen",
     "summary": "Stanford alum; startup founder",
     "match_evidence": ["Met at robotics conference in 2025"]
@@ -495,17 +523,19 @@ search_people("Mike Chen from Stanford who I met about a year ago")
 ]
 ```
 
-The agent may then ask the user which Mike was intended and use the selected person_id for subsequent writes.
+The agent may then ask the user which Mike was intended and use the selected person_id for subsequent writes. Identical display names are expected and allowed; user-facing output may show `Mike (P0042)` to disambiguate.
 
 ## 23. Write Model and Atomicity
 
 - Broad reads are allowed; writes should be narrow and structured.
 
-- Provide operations such as create_person, add_fact, update_fact, remove_fact, record_interaction, update_contact_details, update_summary, set_birthday, set_contact_cadence, and archive_person.
+- Provide operations such as create_person, add_fact, update_fact, remove_fact, record_interaction, update_interaction, remove_interaction, update_contact_details, update_summary, update_person_name, set_birthday, set_contact_cadence, and archive_person.
+
+- `create_person` assigns the generic ID; the caller supplies only the best known name (which may be incomplete). Any existing people with the same name are returned as `possible_duplicates` -- advisory only, never auto-merged, never a reason to reject.
 
 - Also provide a preferred one-person batch update operation for related changes discovered together.
 
-- A batch may add an interaction, add/update/remove facts, and update structured fields for one person.
+- A batch may add an interaction, add/update/remove facts, rename the person (`set_name`), and update structured fields for one person. A batch still targets exactly one `person_id` and cannot mutate multiple person records; a source about several unrelated people is split into a separate batch per person.
 
 - Validate the entire proposed update before writing.
 
@@ -534,11 +564,14 @@ get_upcoming_birthdays(...)
 list_overdue_contacts(...)
 
 # Writes
-create_person(...)
+create_person(...)                       # server assigns a generic P0001-style id
+update_person_name(person_id, name, retain_previous_as_alias=true, aliases_to_add=[], aliases_to_remove=[])
 add_fact(person_id, ...)
 update_fact(person_id, fact_id, ...)
 remove_fact(person_id, fact_id)
 record_interaction(person_id, ...)
+update_interaction(person_id, interaction_id, ..., move_to_person_id=None, correction_reason=None)
+remove_interaction(person_id, interaction_id, correction_reason)
 update_contact_details(person_id, ...)
 update_summary(person_id, ...)
 set_birthday(person_id, ...)
@@ -579,17 +612,26 @@ The server should publish concise instructions equivalent in meaning to the foll
 ```text
 Montauk is the user's persistent relationship memory about people they know.
 
-IDENTITY
+IDENTITY AND NAMES
 - If you already have a person_id, use it directly.
+- A person_id is a permanent system-generated identity such as P0001. Never derive it from a name, change it after creation, or reuse it.
+- A person's name is the best currently known display name. It may be partial, approximate, misspelled, or later corrected.
+- Never archive and recreate a person merely to correct or complete their name. Use update_person_name and keep useful former or alternate names as aliases.
 - If person_id is unknown, search for the person before creating or modifying a record.
 - Search may return multiple plausible people. Do not guess when identity is ambiguous; surface the candidates and ask the user to clarify.
-- Do not create a duplicate person merely because identity is uncertain.
+- Do not create a duplicate person merely because identity is uncertain. Similar or identical names do not identify the same person; ask before merging identities or moving information between people.
 
 RECORDING INFORMATION
 - Store concise facts and interaction summaries, not raw conversations, emails, transcripts, or message dumps.
 - Record a meaningful interaction even if it produced no new facts.
 - When one event produces several related changes for one person, prefer the atomic one-person batch update.
 - Use high confidence for directly stated or strongly supported facts; use medium or low confidence for genuine inference or uncertainty.
+
+INTERACTION CORRECTIONS
+- Use update_interaction when an interaction occurred but its participants or other details are inaccurate.
+- If an interaction was attributed to the wrong person, correct its participant (move_to_person_id) so the incorrect person retains no interaction record or searchable association.
+- Use remove_interaction only when the interaction record itself is erroneous, never occurred, or duplicates another record.
+- Correcting inaccurate data is not erasing history. Never remove an accurate interaction merely because it is old, inconvenient, sensitive, or no longer relevant.
 
 RECORD SCOPING
 - Keep each record scoped to the person of record.
@@ -616,7 +658,15 @@ Critical workflow hints should be repeated in the descriptions of the tools to w
 
 - search_people should explicitly say that it accepts vague identifying details and may return multiple plausible candidates with match evidence.
 
-- create_person should explicitly warn callers to search first when there is any possibility that the person already exists.
+- create_person should explicitly warn callers to search first when there is any possibility that the person already exists, and say that Montauk assigns the permanent generic person_id while the caller supplies only the best known name (which may be incomplete). It must not imply that a shared name blocks creation.
+
+- update_person_name must say it changes the existing person's display name in place without changing identity or recreating the record, retains the previous name as an alias by default, and applies aliases_to_add/aliases_to_remove atomically.
+
+- update_interaction must explain when to correct fields versus participant attribution (move_to_person_id), and that a corrected participant leaves no record or searchable association on the former person.
+
+- remove_interaction must state that it is only for erroneous or duplicate records, requires a correction_reason, and must not be used to erase accurate history that is merely old, sensitive, or inconvenient.
+
+- archive_person should explicitly say it is not the mechanism for correcting a name.
 
 - Mutation tools should require person_id rather than accepting a free-form name as identity.
 
@@ -804,6 +854,7 @@ Provide a small administration CLI. It is not a person-record editor.
 ```text
 montauk validate
 montauk status
+montauk migrate-ids                       # one-time cutover: name-derived IDs -> generic P0001 IDs
 montauk rebuild-index
 montauk rebuild-vectors
 montauk git-snapshot
@@ -814,6 +865,8 @@ montauk config-check
 ```
 
 Person content is changed through MCP operations or direct Markdown editing.
+
+`montauk migrate-ids` converts an existing deployment whose person IDs are name-derived slugs to generic sequential IDs (`P0001`, ...). It is idempotent, validates the source before writing, takes a pre-migration git snapshot, renames every person file, rewrites every `related_person_id` reference, advances the ID allocator past every migrated ID, verifies that only `^P[0-9]{4,}$` IDs remain with matching filenames and no dangling references, and rebuilds the SQLite index. There is no legacy-ID resolver, `legacy_ids` field, or compatibility period: after the cutover, name-derived IDs fail normal validation like any other malformed ID.
 
 ## 33. Packaging and Deployment
 
@@ -973,6 +1026,12 @@ montauk/
 
 - Tests verify that correctness-critical behavior is enforced deterministically even when a caller ignores or violates the natural-language integration instructions.
 
+- New people receive immutable generic IDs (`P0001`, ...), allocated concurrency-safely and never reused; a person's name can be incomplete at creation and later corrected via `update_person_name` without changing identity or recreating the record; former/partial/misspelled names remain searchable as aliases.
+
+- After `montauk migrate-ids`, every existing person and every persisted reference uses a generic ID, name-derived IDs are rejected by normal validation, and no legacy-ID compatibility schema or resolver remains.
+
+- Agents can correct interaction details and participant attribution with `update_interaction`, and remove wholly erroneous or duplicate interactions with `remove_interaction`; a corrected former participant retains no active or searchable trace, while accurate history is protected from removal by server instructions and tool descriptions.
+
 ## 38. Phase 2 Opportunities
 
 - Server-side LLM ingestion of raw WhatsApp/email/meeting material.
@@ -1017,7 +1076,7 @@ montauk/
 
 ## Appendix A. Recommended API Semantics
 
-Mutation tools should return compact machine-friendly results including person_id, changed object IDs, validation status, and index-update status. Search tools should return concise evidence, not entire records unless explicitly requested. Errors should be typed and actionable: NOT_FOUND, AMBIGUOUS, VALIDATION_ERROR, PERMISSION_DENIED, ARCHIVED, INDEX_DEGRADED, and INTERNAL_ERROR are reasonable starting classes.
+Mutation tools should return compact machine-friendly results including person_id, changed object IDs, validation status, and index-update status. `create_person` and `update_person_name` additionally return `possible_duplicates` (other records sharing the name) and `warnings`; the interaction-correction tools return the affected person IDs and, for a re-attribution, the new interaction id on the corrected person. Search tools should return concise evidence, not entire records unless explicitly requested. Errors should be typed and actionable: NOT_FOUND, AMBIGUOUS, VALIDATION_ERROR, PERMISSION_DENIED, ARCHIVED, INDEX_DEGRADED, and INTERNAL_ERROR are reasonable starting classes.
 
 ## Appendix B. Atomic Markdown Writes
 

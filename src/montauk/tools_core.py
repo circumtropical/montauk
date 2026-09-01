@@ -16,9 +16,9 @@ from dataclasses import dataclass
 from mcp.server.mcpserver import Context, MCPServer
 from pydantic import ValidationError as PydanticValidationError
 
-from .auth import AgentIdentity, CredentialStore, resolve_http_identity, require_write
+from .auth import AgentIdentity, CredentialStore, require_write, resolve_http_identity
 from .errors import ArchivedError, MontaukValidationError, NotFoundError
-from .ids import PERSON_ID_RE, next_fact_id, next_interaction_id, next_person_id
+from .ids import PERSON_ID_RE, next_fact_id, next_interaction_id, normalize_alias
 from .markdown_store import MarkdownStore, PersonNotFoundError, person_to_markdown
 from .models import ContactInfo, Fact, Interaction, Person, Source
 from .schema import CATEGORIES
@@ -28,6 +28,8 @@ from .tool_types import (
     AddFactOp,
     BatchOperation,
     IndexUpdateStatus,
+    InteractionMutationResult,
+    NameUpdateResult,
     PersonCandidate,
     PersonCore,
     RecordInteractionOp,
@@ -35,6 +37,7 @@ from .tool_types import (
     SearchResult,
     SetBirthdayOp,
     SetContactCadenceOp,
+    SetNameOp,
     UpdateContactDetailsOp,
     UpdateFactOp,
     UpdateSummaryOp,
@@ -67,6 +70,68 @@ INTERACTION_SCOPING_RULE = (
     "relationship with them. Unrelated people discussed in the source material must not be "
     "included."
 )
+
+# Identity vs. name guidance (amendment: generic person IDs + mutable names).
+NAME_UPDATE_RULE = (
+    "Changes the existing person's display name in place. person_id (their permanent "
+    "identity) and their canonical file are unchanged -- this is not archive-and-recreate. "
+    "The previous name is kept as an alias by default; pass retain_previous_as_alias=false "
+    "when the old value is wrong or should not stay associated with the person. Names are "
+    "not unique: a matching name on another record does not make them the same person, and "
+    "the change is never rejected or auto-merged for that reason."
+)
+INTERACTION_CORRECTION_RULE = (
+    "Correcting inaccurate data is not erasing history. Use update_interaction when the "
+    "interaction happened but a recorded detail is wrong (including the wrong participant -- "
+    "pass move_to_person_id to re-attribute it, leaving no trace on the former person). Use "
+    "remove_interaction only when the interaction record itself is erroneous, never "
+    "occurred, or duplicates another. Never remove an accurate interaction just because it "
+    "is old, inconvenient, sensitive, or no longer relevant."
+)
+
+
+def _find_possible_duplicates(
+    ctx: MontaukContext, name: str, *, exclude_person_id: str | None = None
+) -> list[PersonCandidate]:
+    """Active people whose current display name or an alias matches `name`
+    under normal name-normalization. Advisory only: Montauk never merges
+    people or refuses a write because a name is shared (spec section 22)."""
+    target = normalize_alias(name)
+    matches: list[PersonCandidate] = []
+    for row in ctx.sqlite_index.list_all():
+        if row["person_id"] == exclude_person_id:
+            continue
+        names = [row["name"], *json.loads(row["aliases_json"])]
+        if any(normalize_alias(n) == target for n in names):
+            matches.append(
+                PersonCandidate(
+                    person_id=row["person_id"],
+                    name=row["name"],
+                    summary=row["summary"],
+                    match_evidence=[f"existing record already uses the name {name!r}"],
+                )
+            )
+    return matches
+
+
+def apply_name_update(
+    person: Person,
+    *,
+    name: str,
+    retain_previous_as_alias: bool = True,
+    aliases_to_add: list[str] | None = None,
+    aliases_to_remove: list[str] | None = None,
+) -> Person:
+    """Single source of truth for a display-name change (used by both the
+    update_person_name tool and the set_name batch op). Returns a new,
+    freshly validated Person with the same id/file; alias normalization
+    and current-name exclusion are handled by the Person model."""
+    remove_keys = {normalize_alias(a) for a in (aliases_to_remove or [])}
+    new_aliases = [a for a in person.aliases if normalize_alias(a) not in remove_keys]
+    if retain_previous_as_alias and normalize_alias(person.name) != normalize_alias(name):
+        new_aliases.append(person.name)
+    new_aliases.extend(aliases_to_add or [])
+    return _replace_field(person, name=name, aliases=new_aliases)
 
 
 @dataclass
@@ -165,6 +230,18 @@ def _write_and_index(ctx: MontaukContext, person: Person) -> IndexUpdateStatus:
     except Exception:
         logger.exception("failed to update derived index for person %r", person.id)
         return "degraded"
+
+
+def _write_and_index_many(ctx: MontaukContext, *people: Person) -> IndexUpdateStatus:
+    """Write and re-index several people in one serialized op (used by a
+    participant correction, which moves one interaction between two
+    records). Canonical Markdown for every person is written first; any
+    derived-index failure downgrades the whole result to degraded."""
+    status: IndexUpdateStatus = "ok"
+    for person in people:
+        if _write_and_index(ctx, person) == "degraded":
+            status = "degraded"
+    return status
 
 
 def _authorize_write(ctx: MontaukContext, mcp_ctx: Context) -> None:
@@ -270,6 +347,15 @@ def _apply_batch_op(
     if isinstance(operation, UpdateSummaryOp):
         return _replace_field(person, summary=operation.summary), []
 
+    if isinstance(operation, SetNameOp):
+        return apply_name_update(
+            person,
+            name=operation.name,
+            retain_previous_as_alias=operation.retain_previous_as_alias,
+            aliases_to_add=operation.aliases_to_add,
+            aliases_to_remove=operation.aliases_to_remove,
+        ), []
+
     if isinstance(operation, SetBirthdayOp):
         return _replace_field(person, birthday=operation.birthday), []
 
@@ -288,7 +374,7 @@ def register_batch_tools(server: MCPServer, ctx: MontaukContext) -> None:
         description=(
             "Atomically apply multiple related changes to exactly one known person_id in a single "
             "call: any mix of add_fact, update_fact, remove_fact, record_interaction, "
-            "update_contact_details, update_summary, set_birthday, and set_contact_cadence "
+            "update_contact_details, update_summary, set_name, set_birthday, and set_contact_cadence "
             "operations. The entire batch is validated before any change is written -- if any "
             "operation is invalid, none of them are applied. Prefer this over separate tool calls "
             "when one interaction or source event produces several related updates for one person. "
@@ -429,9 +515,13 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
 
     @server.tool(
         description=(
-            "Create a new person record. Search first (search_people) if the person might already "
-            "exist -- do not use this tool to resolve identity uncertainty; if search returns "
-            "plausible candidates, ask the user to clarify instead of creating a duplicate. The "
+            "Create a new person record. Montauk assigns the permanent person_id (a generic "
+            "identifier such as P0001); you supply the best name currently known, which may be "
+            "partial, approximate, or a single word. Search first (search_people) if the person "
+            "might already exist -- do not use this tool to resolve identity uncertainty; if search "
+            "returns plausible candidates, ask the user to clarify instead of creating a duplicate. "
+            "A shared name is allowed and never blocks creation: any existing people with the same "
+            "name are returned in possible_duplicates for you to disambiguate, not merged. The "
             "returned person_id is permanent and should be used for all subsequent operations on "
             "this person. The initial summary must describe only this person -- do not fold in "
             "details about other people who happened to appear in the same source."
@@ -451,8 +541,7 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
         _authorize_write(ctx, mcp_ctx)
 
         def op() -> WriteResult:
-            existing_ids = set(store.list_person_ids()) | set(store.list_archived_person_ids())
-            person_id = next_person_id(name, existing_ids)
+            person_id = store.allocate_person_id()
             try:
                 person = Person(
                     id=person_id,
@@ -467,8 +556,11 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
                 )
             except PydanticValidationError as exc:
                 raise MontaukValidationError(str(exc)) from exc
+            duplicates = _find_possible_duplicates(ctx, name)
             status = _write_and_index(ctx, person)
-            return WriteResult(person_id=person.id, index_update_status=status)
+            return WriteResult(
+                person_id=person.id, index_update_status=status, possible_duplicates=duplicates
+            )
 
         return await write_queue.submit(op)
 
@@ -624,6 +716,145 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
 
     @server.tool(
         description=(
+            "Correct a recorded interaction on person_id by interaction_id. Use this when the "
+            "interaction happened but a detail is wrong. Only the fields you pass change; omitted "
+            "fields keep their current value (like update_fact, this cannot clear a field to empty). "
+            "The interaction_id never changes. To fix a wrong participant, pass move_to_person_id: "
+            "the interaction is moved to that person (a fresh interaction_id is allocated there) and "
+            "removed entirely from the original person -- no voided record or searchable trace is "
+            "left behind. This is a correction, not deletion of history. " + INTERACTION_SCOPING_RULE
+        )
+    )
+    async def update_interaction(
+        person_id: str,
+        interaction_id: str,
+        mcp_ctx: Context,
+        date: str | None = None,
+        channel: str | None = None,
+        connection_level: int | None = None,
+        summary: str | None = None,
+        sources: list[Source] | None = None,
+        move_to_person_id: str | None = None,
+        correction_reason: str | None = None,
+    ) -> InteractionMutationResult:
+        _authorize_write(ctx, mcp_ctx)
+
+        def op() -> InteractionMutationResult:
+            person = _load_person_or_error(store, person_id)
+            existing = person.get_interaction(interaction_id)
+            if existing is None:
+                raise NotFoundError(
+                    f"interaction {interaction_id!r} not found on person {person_id!r}"
+                )
+            overrides = {
+                k: v
+                for k, v in {
+                    "date": date,
+                    "channel": channel,
+                    "connection_level": connection_level,
+                    "summary": summary,
+                    "sources": sources,
+                }.items()
+                if v is not None
+            }
+            merged = {**existing.model_dump(), **overrides}
+
+            moving = move_to_person_id is not None and move_to_person_id != person_id
+            if moving:
+                target = _load_person_or_error(store, move_to_person_id)
+                new_interaction_id = next_interaction_id(target.interaction_ids())
+                merged["id"] = new_interaction_id
+                try:
+                    new_interaction = Interaction(**merged)
+                except PydanticValidationError as exc:
+                    raise MontaukValidationError(str(exc)) from exc
+                source_updated = _replace_field(
+                    person, interactions=[i for i in person.interactions if i.id != interaction_id]
+                )
+                target_updated = _replace_field(
+                    target, interactions=[*target.interactions, new_interaction]
+                )
+                status = _write_and_index_many(ctx, source_updated, target_updated)
+                logger.info(
+                    "interaction %s re-attributed from person %s to person %s (as %s)",
+                    interaction_id,
+                    person_id,
+                    move_to_person_id,
+                    new_interaction_id,
+                )
+                return InteractionMutationResult(
+                    person_id=person_id,
+                    interaction_id=interaction_id,
+                    operation="reattributed",
+                    moved_to_person_id=move_to_person_id,
+                    new_interaction_id=new_interaction_id,
+                    affected_person_ids=[person_id, move_to_person_id],
+                    index_update_status=status,
+                )
+
+            merged["id"] = interaction_id
+            try:
+                new_interaction = Interaction(**merged)
+            except PydanticValidationError as exc:
+                raise MontaukValidationError(str(exc)) from exc
+            updated = _replace_field(
+                person,
+                interactions=[new_interaction if i.id == interaction_id else i for i in person.interactions],
+            )
+            status = _write_and_index(ctx, updated)
+            logger.info("interaction %s/%s corrected", person_id, interaction_id)
+            return InteractionMutationResult(
+                person_id=person_id,
+                interaction_id=interaction_id,
+                operation="updated",
+                affected_person_ids=[person_id],
+                index_update_status=status,
+            )
+
+        return await write_queue.submit(op)
+
+    @server.tool(
+        description=(
+            "Remove an interaction from person_id by interaction_id. Use this ONLY when the "
+            "interaction record itself is erroneous: it never happened, it was created by mistake, "
+            "or it duplicates another interaction. A non-empty correction_reason is required. The "
+            "interaction and every reference to it are removed from active memory and indexes with "
+            "no voided copy retained. Do NOT use this to remove an accurate interaction merely "
+            "because it is old, inconvenient, sensitive, embarrassing, or no longer relevant -- "
+            "accurate history is kept. To fix a wrong participant or detail, use update_interaction "
+            "instead."
+        )
+    )
+    async def remove_interaction(
+        person_id: str, interaction_id: str, correction_reason: str, mcp_ctx: Context
+    ) -> InteractionMutationResult:
+        _authorize_write(ctx, mcp_ctx)
+        if not correction_reason or not correction_reason.strip():
+            raise MontaukValidationError("remove_interaction requires a non-empty correction_reason")
+
+        def op() -> InteractionMutationResult:
+            person = _load_person_or_error(store, person_id)
+            if person.get_interaction(interaction_id) is None:
+                raise NotFoundError(
+                    f"interaction {interaction_id!r} not found on person {person_id!r}"
+                )
+            updated = _replace_field(
+                person, interactions=[i for i in person.interactions if i.id != interaction_id]
+            )
+            status = _write_and_index(ctx, updated)
+            logger.info("interaction %s/%s removed as erroneous", person_id, interaction_id)
+            return InteractionMutationResult(
+                person_id=person_id,
+                interaction_id=interaction_id,
+                operation="removed",
+                affected_person_ids=[person_id],
+                index_update_status=status,
+            )
+
+        return await write_queue.submit(op)
+
+    @server.tool(
+        description=(
             "Update current contact details (emails, phones, address, messaging handles) for a known "
             "person_id. Only the fields you pass are replaced; omitted fields keep their current "
             "value. This represents currently-valid contact info only -- obsolete details belong in a "
@@ -676,6 +907,48 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
             updated = _replace_field(person, summary=summary)
             status = _write_and_index(ctx, updated)
             return WriteResult(person_id=person_id, index_update_status=status)
+
+        return await write_queue.submit(op)
+
+    @server.tool(
+        description=(
+            "Change the display name of an existing person_id. " + NAME_UPDATE_RULE + " Use this "
+            "(not archive + create_person) to fix a misspelled, partial, or outdated name. "
+            "aliases_to_add / aliases_to_remove are applied atomically with the rename; aliases are "
+            "de-duplicated and the current name is never stored as its own alias."
+        )
+    )
+    async def update_person_name(
+        person_id: str,
+        name: str,
+        mcp_ctx: Context,
+        retain_previous_as_alias: bool = True,
+        aliases_to_add: list[str] | None = None,
+        aliases_to_remove: list[str] | None = None,
+    ) -> NameUpdateResult:
+        _authorize_write(ctx, mcp_ctx)
+
+        def op() -> NameUpdateResult:
+            person = _load_person_or_error(store, person_id)
+            try:
+                updated = apply_name_update(
+                    person,
+                    name=name,
+                    retain_previous_as_alias=retain_previous_as_alias,
+                    aliases_to_add=aliases_to_add,
+                    aliases_to_remove=aliases_to_remove,
+                )
+            except PydanticValidationError as exc:
+                raise MontaukValidationError(str(exc)) from exc
+            duplicates = _find_possible_duplicates(ctx, name, exclude_person_id=person_id)
+            status = _write_and_index(ctx, updated)
+            return NameUpdateResult(
+                person_id=person.id,
+                name=updated.name,
+                aliases=updated.aliases,
+                index_update_status=status,
+                possible_duplicates=duplicates,
+            )
 
         return await write_queue.submit(op)
 

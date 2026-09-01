@@ -55,6 +55,10 @@ def reconcile_on_startup(ctx: MontaukContext) -> ScanResult:
     malformed person files; only genuine IO failures propagate."""
     result = scan_people_directory(ctx.store)
     write_validation_report(result, ctx.store.data_dir)
+    # Never hand out a generic person ID at or below one already on disk
+    # (e.g. a file added by hand between restarts).
+    if ctx.store.sync_id_sequence():
+        logger.info("advanced person-id sequence to cover an id already present on disk")
     stats = ctx.sqlite_index.reconcile(ctx.store, result)
     logger.info(
         "startup reconciliation: %d valid, %d error(s), %d warning(s) "

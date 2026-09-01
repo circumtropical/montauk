@@ -6,7 +6,7 @@ return concise evidence, not entire records.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, Union
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
 
@@ -46,6 +46,37 @@ class WriteResult(BaseModel):
     person_id: str
     changed_ids: list[str] = Field(default_factory=list)
     status: Literal["ok"] = "ok"
+    index_update_status: IndexUpdateStatus = "ok"
+    # Names are not unique identifiers: create_person and update_person_name
+    # surface any other existing people whose current name/alias matches,
+    # for the agent to disambiguate. Montauk never auto-merges them.
+    possible_duplicates: list[PersonCandidate] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class NameUpdateResult(BaseModel):
+    """Result of update_person_name: identity is unchanged (`person_id`),
+    only the display name and aliases moved."""
+
+    person_id: str
+    name: str
+    aliases: list[str] = Field(default_factory=list)
+    index_update_status: IndexUpdateStatus = "ok"
+    possible_duplicates: list[PersonCandidate] = Field(default_factory=list)
+    warnings: list[str] = Field(default_factory=list)
+
+
+class InteractionMutationResult(BaseModel):
+    """Result of update_interaction / remove_interaction."""
+
+    person_id: str
+    interaction_id: str
+    operation: Literal["updated", "reattributed", "removed"]
+    # For a participant correction, the person the interaction now belongs
+    # to (and its freshly allocated interaction id there).
+    moved_to_person_id: str | None = None
+    new_interaction_id: str | None = None
+    affected_person_ids: list[str] = Field(default_factory=list)
     index_update_status: IndexUpdateStatus = "ok"
 
 
@@ -102,6 +133,14 @@ class UpdateContactDetailsOp(BaseModel):
 class UpdateSummaryOp(BaseModel):
     op: Literal["update_summary"] = "update_summary"
     summary: str
+
+
+class SetNameOp(BaseModel):
+    op: Literal["set_name"] = "set_name"
+    name: str
+    retain_previous_as_alias: bool = True
+    aliases_to_add: list[str] = Field(default_factory=list)
+    aliases_to_remove: list[str] = Field(default_factory=list)
 
 
 class SetBirthdayOp(BaseModel):
@@ -168,15 +207,16 @@ class HealthStatus(BaseModel):
 
 
 BatchOperation = Annotated[
-    Union[
-        AddFactOp,
-        UpdateFactOp,
-        RemoveFactOp,
-        RecordInteractionOp,
-        UpdateContactDetailsOp,
-        UpdateSummaryOp,
-        SetBirthdayOp,
-        SetContactCadenceOp,
-    ],
+    (
+        AddFactOp
+        | UpdateFactOp
+        | RemoveFactOp
+        | RecordInteractionOp
+        | UpdateContactDetailsOp
+        | UpdateSummaryOp
+        | SetNameOp
+        | SetBirthdayOp
+        | SetContactCadenceOp
+    ),
     Field(discriminator="op"),
 ]

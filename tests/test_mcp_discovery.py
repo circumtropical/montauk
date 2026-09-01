@@ -35,7 +35,7 @@ class TestToolCatalogCompleteness:
     async def test_every_tool_has_a_name_description_and_object_input_schema(self, tmp_path):
         async with running_session(tmp_path) as (session, _ctx):
             tools = (await session.list_tools()).tools
-            assert len(tools) == 23
+            assert len(tools) == 26
             for tool in tools:
                 assert tool.name
                 assert tool.description and len(tool.description) >= 20, f"{tool.name} description too thin"
@@ -49,8 +49,11 @@ class TestToolCatalogCompleteness:
             "update_fact",
             "remove_fact",
             "record_interaction",
+            "update_interaction",
+            "remove_interaction",
             "update_contact_details",
             "update_summary",
+            "update_person_name",
             "set_birthday",
             "set_contact_cadence",
             "update_person_batch",

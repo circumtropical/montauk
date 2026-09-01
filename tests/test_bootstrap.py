@@ -35,30 +35,30 @@ class TestReconcileOnStartup:
     def test_populates_sqlite_index_from_markdown(self, tmp_path):
         config = _config(tmp_path)
         store = MarkdownStore(config.data_dir_path)
-        store.write_person(Person(id="homer-simpson", name="Homer Simpson"))
+        store.write_person(Person(id="P0001", name="Homer Simpson"))
         ctx = build_context(config, with_semantic=False, with_auth=False)
 
         result = reconcile_on_startup(ctx)
 
         assert result.healthy is True
-        assert ctx.sqlite_index.get_row("homer-simpson") is not None
+        assert ctx.sqlite_index.get_row("P0001") is not None
 
     def test_malformed_file_does_not_crash_startup(self, tmp_path):
         config = _config(tmp_path)
         store = MarkdownStore(config.data_dir_path)
-        store.write_person(Person(id="homer-simpson", name="Homer Simpson"))
+        store.write_person(Person(id="P0001", name="Homer Simpson"))
         (store.people_dir / "broken.md").write_text("---\nid: [bad\n---\n\n# X\n")
         ctx = build_context(config, with_semantic=False, with_auth=False)
 
         result = reconcile_on_startup(ctx)
 
         assert result.healthy is False
-        assert "homer-simpson" in result.valid
+        assert "P0001" in result.valid
 
     def test_semantic_index_incrementally_updated_not_fully_rebuilt(self, tmp_path):
         config = _config(tmp_path, search={"semantic_enabled": True})
         store = MarkdownStore(config.data_dir_path)
-        store.write_person(Person(id="homer-simpson", name="Homer Simpson", summary="Works at the plant."))
+        store.write_person(Person(id="P0001", name="Homer Simpson", summary="Works at the plant."))
         ctx = build_context(config, with_semantic=True, with_auth=False)
 
         reconcile_on_startup(ctx)
@@ -73,7 +73,7 @@ class TestReconcileOnStartup:
         assert ctx.semantic_index.chunk_count() == 1
 
         # Adding a second person only adds their chunk, incrementally.
-        store.write_person(Person(id="marge-simpson", name="Marge Simpson", summary="Keeps the house running."))
+        store.write_person(Person(id="P0002", name="Marge Simpson", summary="Keeps the house running."))
         reconcile_on_startup(ctx)
         assert ctx.semantic_index.chunk_count() == 2
 
@@ -83,17 +83,17 @@ class TestReconcileOnStartup:
         # immediately (Phase 1 has no filesystem watcher).
         config = _config(tmp_path)
         store = MarkdownStore(config.data_dir_path)
-        store.write_person(Person(id="homer-simpson", name="Homer Simpson", summary="Original summary."))
+        store.write_person(Person(id="P0001", name="Homer Simpson", summary="Original summary."))
         ctx = build_context(config, with_semantic=False, with_auth=False)
         reconcile_on_startup(ctx)
-        assert ctx.sqlite_index.get_row("homer-simpson")["summary"] == "Original summary."
+        assert ctx.sqlite_index.get_row("P0001")["summary"] == "Original summary."
 
         # Simulate a human directly editing the file in a text editor,
         # bypassing MarkdownStore/write_queue entirely.
-        path = store.person_path("homer-simpson")
+        path = store.person_path("P0001")
         path.write_text(path.read_text().replace("Original summary.", "Hand-edited summary."))
 
         result = reconcile_on_startup(ctx)
 
-        assert result.valid["homer-simpson"].summary == "Hand-edited summary."
-        assert ctx.sqlite_index.get_row("homer-simpson")["summary"] == "Hand-edited summary."
+        assert result.valid["P0001"].summary == "Hand-edited summary."
+        assert ctx.sqlite_index.get_row("P0001")["summary"] == "Hand-edited summary."

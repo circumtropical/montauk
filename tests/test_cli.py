@@ -35,7 +35,7 @@ class TestValidate:
 class TestStatus:
     def test_reports_counts(self, tmp_path):
         store = MarkdownStore(tmp_path / "data")
-        store.write_person(Person(id="homer-simpson", name="Homer Simpson"))
+        store.write_person(Person(id="P0001", name="Homer Simpson"))
         result = runner.invoke(app, ["status", *_data_dir_args(tmp_path)])
         assert result.exit_code == 0
         assert "valid people: 1" in result.stdout
@@ -44,7 +44,7 @@ class TestStatus:
 class TestRebuildIndex:
     def test_rebuilds_and_reports_count(self, tmp_path):
         store = MarkdownStore(tmp_path / "data")
-        store.write_person(Person(id="homer-simpson", name="Homer Simpson"))
+        store.write_person(Person(id="P0001", name="Homer Simpson"))
         result = runner.invoke(app, ["rebuild-index", *_data_dir_args(tmp_path)])
         assert result.exit_code == 0
         assert "1 people indexed" in result.stdout
@@ -52,13 +52,13 @@ class TestRebuildIndex:
         from montauk.sqlite_index import SqliteIndex
 
         index = SqliteIndex(tmp_path / "data" / "index" / "relationships.sqlite")
-        assert index.get_row("homer-simpson") is not None
+        assert index.get_row("P0001") is not None
 
 
 class TestRebuildVectors:
     def test_rebuilds_and_reports_chunk_count(self, tmp_path):
         store = MarkdownStore(tmp_path / "data")
-        store.write_person(Person(id="homer-simpson", name="Homer Simpson", summary="Works at the plant."))
+        store.write_person(Person(id="P0001", name="Homer Simpson", summary="Works at the plant."))
         result = runner.invoke(app, ["rebuild-vectors", *_data_dir_args(tmp_path)])
         assert result.exit_code == 0
         assert "1 chunks" in result.stdout
@@ -67,7 +67,7 @@ class TestRebuildVectors:
 class TestGitSnapshot:
     def test_commits_when_data_present(self, tmp_path):
         store = MarkdownStore(tmp_path / "data")
-        store.write_person(Person(id="homer-simpson", name="Homer Simpson"))
+        store.write_person(Person(id="P0001", name="Homer Simpson"))
         result = runner.invoke(app, ["git-snapshot", *_data_dir_args(tmp_path)])
         assert result.exit_code == 0
         assert "committed" in result.stdout
@@ -223,7 +223,40 @@ class TestInit:
         assert "config.yaml" in tracked
         assert "README.md" in tracked
         assert "people/.gitkeep" in tracked
+        assert "person-id-sequence.json" in tracked  # canonical ID high-water mark is versioned
         assert not any(p.startswith("auth/") or p.startswith("index/") for p in tracked)
+
+    def test_person_id_sequence_starts_at_zero(self, tmp_path):
+        data_dir = tmp_path / "data"
+        runner.invoke(app, ["init", "--data-dir", str(data_dir)])
+        import json
+
+        assert json.loads((data_dir / "person-id-sequence.json").read_text())["last_allocated"] == 0
+
+
+class TestMigrateIds:
+    def test_converts_name_derived_ids_and_reports(self, tmp_path):
+        data_dir = tmp_path / "data"
+        store = MarkdownStore(data_dir)
+        (store.people_dir / "mike-chen.md").write_text(
+            "---\nid: mike-chen\nname: Mike Chen\n---\n\n# Mike Chen\n\n## Interactions\n", encoding="utf-8"
+        )
+        result = runner.invoke(app, ["migrate-ids", *_data_dir_args(tmp_path)])
+        assert result.exit_code == 0
+        assert "mike-chen  ->  P0001" in result.stdout
+        assert (data_dir / "people" / "P0001.md").exists()
+        assert not (data_dir / "people" / "mike-chen.md").exists()
+
+    def test_is_idempotent(self, tmp_path):
+        data_dir = tmp_path / "data"
+        store = MarkdownStore(data_dir)
+        (store.people_dir / "mike-chen.md").write_text(
+            "---\nid: mike-chen\nname: Mike Chen\n---\n\n# Mike Chen\n\n## Interactions\n", encoding="utf-8"
+        )
+        runner.invoke(app, ["migrate-ids", *_data_dir_args(tmp_path)])
+        second = runner.invoke(app, ["migrate-ids", *_data_dir_args(tmp_path)])
+        assert second.exit_code == 0
+        assert "nothing to migrate" in second.stdout
 
     def test_is_idempotent(self, tmp_path):
         data_dir = tmp_path / "data"

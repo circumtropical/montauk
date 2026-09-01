@@ -62,7 +62,7 @@ class TestInteraction:
 
 class TestPerson:
     def _person(self, **overrides):
-        defaults = dict(id="mike-chen-2", name="Mike Chen")
+        defaults = dict(id="P0001", name="Mike Chen")
         defaults.update(overrides)
         return Person(**defaults)
 
@@ -74,7 +74,7 @@ class TestPerson:
 
     def test_full_person_from_spec_example(self):
         p = Person(
-            id="mike-chen-2",
+            id="P0001",
             name="Mike Chen",
             aliases=["Michael Chen"],
             birthday="1982-04-17",
@@ -152,11 +152,43 @@ class TestPerson:
             )
 
 
+class TestPersonIdFormat:
+    def test_rejects_name_derived_id(self):
+        with pytest.raises(ValidationError):
+            Person(id="mike-chen", name="Mike Chen")
+
+    def test_accepts_generic_id(self):
+        assert Person(id="P0001", name="Mike Chen").id == "P0001"
+        assert Person(id="P100000", name="Mike Chen").id == "P100000"
+
+
+class TestPersonNamesAndAliases:
+    def test_single_word_name_is_allowed(self):
+        assert Person(id="P0001", name="Catherine").name == "Catherine"
+        assert Person(id="P0002", name="Nguyen").name == "Nguyen"
+
+    def test_aliases_are_trimmed_and_deduplicated_case_insensitively(self):
+        p = Person(
+            id="P0001",
+            name="Catherine Nguyen",
+            aliases=["  Cathy  ", "cathy", "CATHY", "Cathrine Nguyen"],
+        )
+        assert p.aliases == ["Cathy", "Cathrine Nguyen"]
+
+    def test_current_name_is_not_stored_as_its_own_alias(self):
+        p = Person(id="P0001", name="Catherine Nguyen", aliases=["catherine nguyen", "Cathy"])
+        assert p.aliases == ["Cathy"]
+
+    def test_blank_aliases_are_dropped(self):
+        p = Person(id="P0001", name="X", aliases=["", "   ", "Real Alias"])
+        assert p.aliases == ["Real Alias"]
+
+
 class TestFactRelatedPerson:
     def test_related_person_id_optional(self):
         f = Fact(id="fact-1", category="Family", text="x")
         assert f.related_person_id is None
 
     def test_related_person_id_set(self):
-        f = Fact(id="fact-1", category="Family", text="Married to Jane", related_person_id="jane-chen")
-        assert f.related_person_id == "jane-chen"
+        f = Fact(id="fact-1", category="Family", text="Married to Jane", related_person_id="P0002")
+        assert f.related_person_id == "P0002"

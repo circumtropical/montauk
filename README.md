@@ -8,6 +8,13 @@ and a semantic vector index are derived, fully disposable acceleration layers th
 deleted and rebuilt at any time without data loss. See `montauk_phase1_build_spec.md` for the
 full Phase 1 specification this implementation follows.
 
+**Identity vs. name.** Each person has a permanent, generic ID (`P0001`, `P0002`, ...) that
+Montauk assigns and never changes or reuses. The person's `name` is just the best label
+currently known — it can be partial or wrong at first and corrected later with
+`update_person_name` (former/alternate spellings are kept as searchable aliases), all without
+touching the ID or the filename (`data/people/P0001.md`). A deployment still on the old
+name-derived IDs (`mike-chen`) converts once with `montauk migrate-ids`.
+
 ## Quick start (local, stdio)
 
 ```bash
@@ -82,6 +89,7 @@ for the one environment variable the stdio transport reads (`MONTAUK_AGENT_TOKEN
 montauk init --data-dir PATH              # scaffold a new deployment + private data repo
 montauk validate                          # scan + validate; exit 1 if unhealthy
 montauk status                            # health summary
+montauk migrate-ids                       # one-time: convert name-derived IDs to generic P0001 IDs
 montauk rebuild-index                     # rebuild the derived SQLite index from Markdown
 montauk rebuild-vectors                   # rebuild the derived semantic index from Markdown
 montauk git-snapshot                      # commit data/people + data/archive now, if changed

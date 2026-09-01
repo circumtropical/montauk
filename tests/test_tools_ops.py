@@ -67,7 +67,7 @@ class TestOverdueContacts:
     async def test_recent_interaction_within_cadence_is_not_overdue(self, tmp_path):
         async with running_session(tmp_path) as (session, _ctx):
             await call(session, "create_person", name="Homer Simpson", desired_contact_cadence_days=30)
-            await call(session, "record_interaction", person_id="homer-simpson", date="2026-08-20")
+            await call(session, "record_interaction", person_id="P0001", date="2026-08-20")
             result = await call(session, "list_overdue_contacts", as_of="2026-08-30")
             assert result == []
 
@@ -75,7 +75,7 @@ class TestOverdueContacts:
     async def test_old_interaction_beyond_cadence_is_overdue(self, tmp_path):
         async with running_session(tmp_path) as (session, _ctx):
             await call(session, "create_person", name="Homer Simpson", desired_contact_cadence_days=7)
-            await call(session, "record_interaction", person_id="homer-simpson", date="2026-08-01")
+            await call(session, "record_interaction", person_id="P0001", date="2026-08-01")
             result = await call(session, "list_overdue_contacts", as_of="2026-08-30")
             assert len(result) == 1
             assert result[0]["status"] == "overdue"
@@ -89,7 +89,7 @@ class TestOverdueContacts:
         # 242 days ago.
         async with running_session(tmp_path) as (session, _ctx):
             await call(session, "create_person", name="Homer Simpson", desired_contact_cadence_days=30)
-            await call(session, "record_interaction", person_id="homer-simpson", date="2026")
+            await call(session, "record_interaction", person_id="P0001", date="2026")
             result = await call(session, "list_overdue_contacts", as_of="2026-08-30")
             assert result == []
 
@@ -99,12 +99,12 @@ class TestArchivePerson:
     async def test_archive_removes_from_active_results(self, tmp_path):
         async with running_session(tmp_path) as (session, ctx):
             await call(session, "create_person", name="Frank Grimes")
-            result = await call(session, "archive_person", person_id="frank-grimes")
+            result = await call(session, "archive_person", person_id="P0001")
             assert result["status"] == "archived"
 
-            assert ctx.store.is_archived("frank-grimes")
-            assert not ctx.store.exists("frank-grimes")
-            assert ctx.sqlite_index.get_row("frank-grimes") is None
+            assert ctx.store.is_archived("P0001")
+            assert not ctx.store.exists("P0001")
+            assert ctx.sqlite_index.get_row("P0001") is None
 
             search = await call(session, "search_people", query="Frank")
             assert search["candidates"] == []
@@ -119,8 +119,8 @@ class TestArchivePerson:
     async def test_archive_already_archived_person_is_archived_error(self, tmp_path):
         async with running_session(tmp_path) as (session, _ctx):
             await call(session, "create_person", name="Frank Grimes")
-            await call(session, "archive_person", person_id="frank-grimes")
-            text = await call_expecting_error(session, "archive_person", person_id="frank-grimes")
+            await call(session, "archive_person", person_id="P0001")
+            text = await call_expecting_error(session, "archive_person", person_id="P0001")
             assert "ARCHIVED" in text
 
     @pytest.mark.asyncio
@@ -133,7 +133,7 @@ class TestArchivePerson:
                 birthday="09-01",
                 desired_contact_cadence_days=7,
             )
-            await call(session, "archive_person", person_id="frank-grimes")
+            await call(session, "archive_person", person_id="P0001")
 
             birthdays = await call(session, "get_upcoming_birthdays", within_days=30, as_of="2026-08-30")
             overdue = await call(session, "list_overdue_contacts", as_of="2026-08-30")
@@ -146,14 +146,14 @@ class TestArchiveReads:
     async def test_list_and_get_archived_person(self, tmp_path):
         async with running_session(tmp_path) as (session, _ctx):
             await call(session, "create_person", name="Frank Grimes")
-            await call(session, "add_fact", person_id="frank-grimes", category="Work & Education", text="Engineer.")
-            await call(session, "archive_person", person_id="frank-grimes")
+            await call(session, "add_fact", person_id="P0001", category="Work & Education", text="Engineer.")
+            await call(session, "archive_person", person_id="P0001")
 
             listed = await call(session, "list_archived_people")
-            assert listed == [{"person_id": "frank-grimes", "name": "Frank Grimes"}]
+            assert listed == [{"person_id": "P0001", "name": "Frank Grimes"}]
 
-            record = await call(session, "get_archived_person", person_id="frank-grimes")
-            assert "id: frank-grimes" in record
+            record = await call(session, "get_archived_person", person_id="P0001")
+            assert "id: P0001" in record
             assert "Engineer." in record
 
     @pytest.mark.asyncio
@@ -166,7 +166,7 @@ class TestArchiveReads:
     async def test_get_archived_person_on_active_person_is_validation_error(self, tmp_path):
         async with running_session(tmp_path) as (session, _ctx):
             await call(session, "create_person", name="Homer Simpson")
-            text = await call_expecting_error(session, "get_archived_person", person_id="homer-simpson")
+            text = await call_expecting_error(session, "get_archived_person", person_id="P0001")
             assert "VALIDATION_ERROR" in text
 
     @pytest.mark.asyncio

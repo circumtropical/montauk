@@ -9,7 +9,7 @@ import re
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .dates import Birthday, FlexDate
-from .ids import PERSON_ID_RE
+from .ids import PERSON_ID_RE, normalize_alias
 from .schema import CATEGORIES, Confidence
 
 _FACT_ID_RE = re.compile(r"^fact-\d+$")
@@ -141,7 +141,10 @@ class Person(BaseModel):
     @classmethod
     def _validate_id(cls, v: str) -> str:
         if not PERSON_ID_RE.match(v):
-            raise ValueError(f"person id {v!r} must be lowercase, alphanumeric, hyphen-separated")
+            raise ValueError(
+                f"person id {v!r} must be a generic Montauk identifier of the form 'P0001' "
+                "(uppercase P followed by >= 4 digits). Name-derived IDs are not valid."
+            )
         return v
 
     @field_validator("name")
@@ -151,12 +154,36 @@ class Person(BaseModel):
             raise ValueError("person name must not be empty")
         return v
 
+    @field_validator("aliases")
+    @classmethod
+    def _normalize_aliases(cls, v: list[str]) -> list[str]:
+        """Trim, drop blanks, and de-duplicate aliases under the standard
+        name-normalization rules while preserving each alias's first-seen
+        human-readable spelling (spec section 9)."""
+        deduped: dict[str, str] = {}
+        for alias in v:
+            spelled = alias.strip()
+            if not spelled:
+                continue
+            deduped.setdefault(normalize_alias(spelled), spelled)
+        return list(deduped.values())
+
     @field_validator("desired_contact_cadence_days")
     @classmethod
     def _validate_cadence(cls, v: int | None) -> int | None:
         if v is not None and v <= 0:
             raise ValueError(f"desired_contact_cadence_days {v} must be a positive integer or null")
         return v
+
+    @model_validator(mode="after")
+    def _aliases_exclude_current_name(self) -> Person:
+        """The current display name is not stored redundantly as an alias
+        (spec section 9)."""
+        name_key = normalize_alias(self.name)
+        filtered = [a for a in self.aliases if normalize_alias(a) != name_key]
+        if len(filtered) != len(self.aliases):
+            self.aliases = filtered
+        return self
 
     @model_validator(mode="after")
     def _validate_unique_local_ids(self) -> Person:

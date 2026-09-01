@@ -32,7 +32,7 @@ class TestNoSensitiveContentInLogs:
     async def test_add_fact_with_sensitive_text(self, tmp_path, captured_logs):
         async with running_session(tmp_path) as (session, _ctx):
             await call(session, "create_person", name="Homer Simpson")
-            await call(session, "add_fact", person_id="homer-simpson", category="General Notes", text=SENSITIVE_FACT_TEXT)
+            await call(session, "add_fact", person_id="P0001", category="General Notes", text=SENSITIVE_FACT_TEXT)
         assert SENSITIVE_FACT_TEXT not in captured_logs.text
 
     @pytest.mark.asyncio
@@ -42,7 +42,7 @@ class TestNoSensitiveContentInLogs:
             await call(
                 session,
                 "update_contact_details",
-                person_id="homer-simpson",
+                person_id="P0001",
                 emails=[SENSITIVE_EMAIL],
                 phones=[SENSITIVE_PHONE],
             )
@@ -57,7 +57,7 @@ class TestNoSensitiveContentInLogs:
             await call(session, "create_person", name="Homer Simpson")
             await session.call_tool(
                 "add_fact",
-                {"person_id": "homer-simpson", "category": "Not A Real Category", "text": SENSITIVE_FACT_TEXT},
+                {"person_id": "P0001", "category": "Not A Real Category", "text": SENSITIVE_FACT_TEXT},
             )
         assert SENSITIVE_FACT_TEXT not in captured_logs.text
 
@@ -76,10 +76,10 @@ class TestNoSensitiveContentInLogs:
         ctx = MontaukContext(
             store=store, sqlite_index=ExplodingSqliteIndex(), write_queue=WriteQueue(tmp_path / "data")
         )
-        person = Person(id="homer-simpson", name="Homer Simpson", summary=SENSITIVE_SUMMARY)
+        person = Person(id="P0001", name="Homer Simpson", summary=SENSITIVE_SUMMARY)
 
         status = _write_and_index(ctx, person)
 
         assert status == "degraded"
         assert SENSITIVE_SUMMARY not in captured_logs.text
-        assert "homer-simpson" in captured_logs.text  # the identifier itself IS expected
+        assert "P0001" in captured_logs.text  # the identifier itself IS expected

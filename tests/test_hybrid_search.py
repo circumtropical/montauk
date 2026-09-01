@@ -34,13 +34,13 @@ class TestHybridSearchPeople:
             result = await call(session, "search_people", query="the robotics guy I met through MIT")
 
             person_ids = {c["person_id"] for c in result["candidates"]}
-            assert "mike-chen" in person_ids
-            assert "mike-chen-2" in person_ids
+            assert "P0001" in person_ids
+            assert "P0002" in person_ids
 
             by_id = {c["person_id"]: c for c in result["candidates"]}
-            assert by_id["mike-chen"]["match_evidence"] != by_id["mike-chen-2"]["match_evidence"]
+            assert by_id["P0001"]["match_evidence"] != by_id["P0002"]["match_evidence"]
             # The robotics one should rank first given the query.
-            assert result["candidates"][0]["person_id"] == "mike-chen"
+            assert result["candidates"][0]["person_id"] == "P0001"
 
     @pytest.mark.asyncio
     async def test_semantic_match_surfaces_person_with_no_exact_substring_hit(self, tmp_path, provider):
@@ -55,8 +55,8 @@ class TestHybridSearchPeople:
             # Query shares no substring with "Sarah Jones" or the summary text.
             result = await call(session, "search_people", query="pastry chef who bakes bread")
 
-            assert any(c["person_id"] == "sarah-jones" for c in result["candidates"])
-            evidence = next(c for c in result["candidates"] if c["person_id"] == "sarah-jones")["match_evidence"]
+            assert any(c["person_id"] == "P0001" for c in result["candidates"])
+            evidence = next(c for c in result["candidates"] if c["person_id"] == "P0001")["match_evidence"]
             assert any("semantic match" in e for e in evidence)
 
     @pytest.mark.asyncio
@@ -68,11 +68,11 @@ class TestHybridSearchPeople:
                 name="Homer Simpson",
                 summary="Neighbor who works at the power plant.",
             )
-            await call(session, "add_fact", person_id="homer-simpson", category="Interests", text="Loves donuts.")
+            await call(session, "add_fact", person_id="P0001", category="Interests", text="Loves donuts.")
 
             result = await call(session, "search_people", query="Homer")
 
-            homer = next(c for c in result["candidates"] if c["person_id"] == "homer-simpson")
+            homer = next(c for c in result["candidates"] if c["person_id"] == "P0001")
             assert any("name matches" in e for e in homer["match_evidence"])
 
     @pytest.mark.asyncio
@@ -98,7 +98,7 @@ class TestHybridSearchPeople:
     async def test_archived_person_does_not_appear_in_semantic_results(self, tmp_path, provider):
         async with running_session(tmp_path, embedding_provider=provider) as (session, _ctx):
             await call(session, "create_person", name="Frank Grimes", summary="Engineer at the power plant.")
-            await call(session, "archive_person", person_id="frank-grimes")
+            await call(session, "archive_person", person_id="P0001")
 
             result = await call(session, "search_people", query="engineer power plant")
             assert result["candidates"] == []

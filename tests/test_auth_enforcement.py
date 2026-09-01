@@ -24,7 +24,7 @@ class TestNoAuthWiredIsPermissive:
     async def test_mutations_work_when_credential_store_is_none(self, tmp_path):
         async with running_session(tmp_path) as (session, _ctx):
             result = await call(session, "create_person", name="Homer Simpson")
-            assert result["person_id"] == "homer-simpson"
+            assert result["person_id"] == "P0001"
 
 
 class TestReadOnlyRejectedOnMutations:
@@ -47,7 +47,7 @@ class TestReadOnlyRejectedOnMutations:
             await call(session, "create_person", name="Homer Simpson")
 
             ctx.stdio_identity = credential_store.verify_token(reader_token)
-            person = await call(session, "get_person", person_id="homer-simpson")
+            person = await call(session, "get_person", person_id="P0001")
             assert person["name"] == "Homer Simpson"
 
     @pytest.mark.asyncio
@@ -59,24 +59,24 @@ class TestReadOnlyRejectedOnMutations:
         async with running_session(tmp_path, credential_store=credential_store) as (session, ctx):
             ctx.stdio_identity = credential_store.verify_token(writer_token)
             await call(session, "create_person", name="Homer Simpson")
-            await call(session, "add_fact", person_id="homer-simpson", category="Family", text="x")
+            await call(session, "add_fact", person_id="P0001", category="Family", text="x")
 
             ctx.stdio_identity = credential_store.verify_token(reader_token)
             mutation_calls = [
                 ("create_person", {"name": "Someone Else"}),
-                ("add_fact", {"person_id": "homer-simpson", "category": "Family", "text": "y"}),
-                ("update_fact", {"person_id": "homer-simpson", "fact_id": "fact-1", "text": "z"}),
-                ("remove_fact", {"person_id": "homer-simpson", "fact_id": "fact-1"}),
-                ("record_interaction", {"person_id": "homer-simpson", "date": "2026"}),
-                ("update_contact_details", {"person_id": "homer-simpson", "emails": ["a@example.com"]}),
-                ("update_summary", {"person_id": "homer-simpson", "summary": "new"}),
-                ("set_birthday", {"person_id": "homer-simpson", "birthday": "1990-01-01"}),
-                ("set_contact_cadence", {"person_id": "homer-simpson", "desired_contact_cadence_days": 30}),
+                ("add_fact", {"person_id": "P0001", "category": "Family", "text": "y"}),
+                ("update_fact", {"person_id": "P0001", "fact_id": "fact-1", "text": "z"}),
+                ("remove_fact", {"person_id": "P0001", "fact_id": "fact-1"}),
+                ("record_interaction", {"person_id": "P0001", "date": "2026"}),
+                ("update_contact_details", {"person_id": "P0001", "emails": ["a@example.com"]}),
+                ("update_summary", {"person_id": "P0001", "summary": "new"}),
+                ("set_birthday", {"person_id": "P0001", "birthday": "1990-01-01"}),
+                ("set_contact_cadence", {"person_id": "P0001", "desired_contact_cadence_days": 30}),
                 (
                     "update_person_batch",
-                    {"person_id": "homer-simpson", "operations": [{"op": "update_summary", "summary": "x"}]},
+                    {"person_id": "P0001", "operations": [{"op": "update_summary", "summary": "x"}]},
                 ),
-                ("archive_person", {"person_id": "homer-simpson"}),
+                ("archive_person", {"person_id": "P0001"}),
             ]
             for tool_name, kwargs in mutation_calls:
                 text = await call_expecting_error(session, tool_name, **kwargs)
@@ -108,9 +108,9 @@ class TestValidReadWriteSucceeds:
         async with running_session(tmp_path, credential_store=credential_store) as (session, ctx):
             ctx.stdio_identity = credential_store.verify_token(token)
             result = await call(session, "create_person", name="Homer Simpson")
-            assert result["person_id"] == "homer-simpson"
-            await call(session, "add_fact", person_id="homer-simpson", category="Family", text="x")
-            await call(session, "archive_person", person_id="homer-simpson")
+            assert result["person_id"] == "P0001"
+            await call(session, "add_fact", person_id="P0001", category="Family", text="x")
+            await call(session, "archive_person", person_id="P0001")
 
 
 class TestNoCredentialPresented:

@@ -95,26 +95,26 @@ class TestScenarioA_UnrelatedPeopleInOneSource:
             await call(session, "create_person", name="Alice Nguyen")
             await call(session, "create_person", name="Bob Jones")
             await call(session, "create_person", name="Carol Smith")
-            bob_before = ctx.store.person_path("bob-jones").read_text()
-            carol_before = ctx.store.person_path("carol-smith").read_text()
+            bob_before = ctx.store.person_path("P0002").read_text()
+            carol_before = ctx.store.person_path("P0003").read_text()
 
             await call(
                 session,
                 "update_person_batch",
-                person_id="alice-nguyen",
+                person_id="P0001",
                 operations=[
                     {"op": "update_summary", "summary": "Started a new job at a robotics startup."},
                     {"op": "add_fact", "category": "Work & Education", "text": "Joined a robotics startup."},
                 ],
             )
 
-            alice_record = await call(session, "get_full_record", person_id="alice-nguyen")
+            alice_record = await call(session, "get_full_record", person_id="P0001")
             assert "Bob" not in alice_record and "Carol" not in alice_record
-            alice_facts = await call(session, "get_facts", person_id="alice-nguyen")
+            alice_facts = await call(session, "get_facts", person_id="P0001")
             assert all(f["related_person_id"] is None for f in alice_facts)
 
-            assert ctx.store.person_path("bob-jones").read_text() == bob_before
-            assert ctx.store.person_path("carol-smith").read_text() == carol_before
+            assert ctx.store.person_path("P0002").read_text() == bob_before
+            assert ctx.store.person_path("P0003").read_text() == carol_before
 
 
 class TestScenarioB_LegitimateDirectInteraction:
@@ -131,22 +131,22 @@ class TestScenarioB_LegitimateDirectInteraction:
             await call(
                 session,
                 "record_interaction",
-                person_id="alice-nguyen",
+                person_id="P0001",
                 date="2026-05-10",
                 summary="Met Bob Jones at the RoboConf conference; Bob introduced her to a prospective customer.",
             )
             result = await call(
                 session,
                 "add_fact",
-                person_id="alice-nguyen",
+                person_id="P0001",
                 category="Work & Education",
                 text="Introduced to a prospective customer by Bob Jones at RoboConf.",
-                related_person_id="bob-jones",
+                related_person_id="P0002",
             )
             assert result["index_update_status"] == "ok"
 
-            facts = await call(session, "get_facts", person_id="alice-nguyen")
-            assert facts[0]["related_person_id"] == "bob-jones"
+            facts = await call(session, "get_facts", person_id="P0001")
+            assert facts[0]["related_person_id"] == "P0002"
 
     @pytest.mark.asyncio
     async def test_structured_reference_to_nonexistent_person_is_rejected(self, tmp_path):
@@ -155,10 +155,10 @@ class TestScenarioB_LegitimateDirectInteraction:
             text = await call_expecting_error(
                 session,
                 "add_fact",
-                person_id="alice-nguyen",
+                person_id="P0001",
                 category="Work & Education",
                 text="Something about someone with no record.",
-                related_person_id="carol-smith",
+                related_person_id="P0099",
             )
             assert "VALIDATION_ERROR" in text
 
@@ -169,7 +169,7 @@ class TestScenarioB_LegitimateDirectInteraction:
             text = await call_expecting_error(
                 session,
                 "add_fact",
-                person_id="alice-nguyen",
+                person_id="P0001",
                 category="Family",
                 text="Married to Bob.",
                 related_person_id="Bob Jones",
@@ -183,10 +183,10 @@ class TestScenarioB_LegitimateDirectInteraction:
             text = await call_expecting_error(
                 session,
                 "add_fact",
-                person_id="alice-nguyen",
+                person_id="P0001",
                 category="General Notes",
                 text="Self reference.",
-                related_person_id="alice-nguyen",
+                related_person_id="P0001",
             )
             assert "VALIDATION_ERROR" in text
 
@@ -201,11 +201,11 @@ class TestScenarioC_SharedDiscussionWithoutSharedRelationship:
         async with running_session(tmp_path) as (session, _ctx):
             await call(session, "create_person", name="Alice Nguyen")
 
-            await call(session, "update_summary", person_id="alice-nguyen", summary="Promoted to engineering manager.")
+            await call(session, "update_summary", person_id="P0001", summary="Promoted to engineering manager.")
 
-            person = await call(session, "get_person", person_id="alice-nguyen")
+            person = await call(session, "get_person", person_id="P0001")
             assert person["summary"] == "Promoted to engineering manager."
-            record = await call(session, "get_full_record", person_id="alice-nguyen")
+            record = await call(session, "get_full_record", person_id="P0001")
             assert "Bob" not in record and "medical" not in record.lower()
 
 
@@ -233,18 +233,18 @@ class TestScenarioD_SeparateUpdatesFromOneSource:
             await call(
                 session,
                 "update_person_batch",
-                person_id="alice-nguyen",
+                person_id="P0001",
                 operations=[{"op": "add_fact", "category": "Life Events", "text": "Bought a house."}],
             )
             await call(
                 session,
                 "update_person_batch",
-                person_id="bob-jones",
+                person_id="P0002",
                 operations=[{"op": "add_fact", "category": "Life Events", "text": "Adopted a dog."}],
             )
 
-            alice_record = await call(session, "get_full_record", person_id="alice-nguyen")
-            bob_record = await call(session, "get_full_record", person_id="bob-jones")
+            alice_record = await call(session, "get_full_record", person_id="P0001")
+            bob_record = await call(session, "get_full_record", person_id="P0002")
             assert "dog" not in alice_record and "Bob" not in alice_record
             assert "house" not in bob_record and "Alice" not in bob_record
 
@@ -270,10 +270,10 @@ class TestRegression:
             result = await call(
                 session,
                 "add_fact",
-                person_id="homer-simpson",
+                person_id="P0001",
                 category="Family",
                 text="Married to Marge Simpson.",
-                related_person_id="marge-simpson",
+                related_person_id="P0002",
             )
             assert result["changed_ids"] == ["fact-1"]
 
@@ -285,32 +285,32 @@ class TestRegression:
             await call(
                 session,
                 "update_person_batch",
-                person_id="homer-simpson",
+                person_id="P0001",
                 operations=[
                     {
                         "op": "add_fact",
                         "category": "General Notes",
                         "text": "Next-door neighbour.",
-                        "related_person_id": "ned-flanders",
+                        "related_person_id": "P0002",
                     }
                 ],
             )
-            facts = await call(session, "get_facts", person_id="homer-simpson")
-            assert facts[0]["related_person_id"] == "ned-flanders"
+            facts = await call(session, "get_facts", person_id="P0001")
+            assert facts[0]["related_person_id"] == "P0002"
 
     @pytest.mark.asyncio
     async def test_reference_to_archived_person_is_still_permitted(self, tmp_path):
         async with running_session(tmp_path) as (session, _ctx):
             await call(session, "create_person", name="Homer Simpson")
             await call(session, "create_person", name="Frank Grimes")
-            await call(session, "archive_person", person_id="frank-grimes")
+            await call(session, "archive_person", person_id="P0002")
             result = await call(
                 session,
                 "add_fact",
-                person_id="homer-simpson",
+                person_id="P0001",
                 category="Work & Education",
                 text="Worked with Frank Grimes at the plant.",
-                related_person_id="frank-grimes",
+                related_person_id="P0002",
             )
             assert result["changed_ids"] == ["fact-1"]
 
@@ -318,5 +318,5 @@ class TestRegression:
     async def test_interaction_with_no_new_facts_still_records(self, tmp_path):
         async with running_session(tmp_path) as (session, _ctx):
             await call(session, "create_person", name="Homer Simpson")
-            result = await call(session, "record_interaction", person_id="homer-simpson", date="2026-08-20")
+            result = await call(session, "record_interaction", person_id="P0001", date="2026-08-20")
             assert result["changed_ids"] == ["int-1"]

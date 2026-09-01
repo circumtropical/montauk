@@ -13,7 +13,7 @@ def _store(tmp_path: Path) -> MarkdownStore:
 
 def _homer() -> Person:
     return Person(
-        id="homer-simpson",
+        id="P0001",
         name="Homer Simpson",
         aliases=["Homie"],
         birthday="1956-05-12",
@@ -31,7 +31,7 @@ def _homer() -> Person:
 
 
 def _no_year_birthday_person() -> Person:
-    return Person(id="ned-flanders", name="Ned Flanders", birthday="05-11")
+    return Person(id="P0002", name="Ned Flanders", birthday="05-11")
 
 
 def _drop_updated_at(row: dict) -> dict:
@@ -46,7 +46,7 @@ class TestRebuildFromScan:
 
         index.rebuild_from_scan(store, scan_people_directory(store))
 
-        row = index.get_row("homer-simpson")
+        row = index.get_row("P0001")
         assert row is not None
         assert row["name"] == "Homer Simpson"
         assert row["aliases_json"] == '["Homie"]'
@@ -63,17 +63,17 @@ class TestRebuildFromScan:
 
         index.rebuild_from_scan(store, scan_people_directory(store))
 
-        row = index.get_row("ned-flanders")
+        row = index.get_row("P0002")
         assert (row["birthday_month"], row["birthday_day"], row["birthday_year"]) == (5, 11, None)
 
     def test_person_with_no_interactions_has_null_last_interaction(self, tmp_path):
         store = _store(tmp_path)
-        store.write_person(Person(id="moe-szyslak", name="Moe Szyslak"))
+        store.write_person(Person(id="P0003", name="Moe Szyslak"))
         index = SqliteIndex(tmp_path / "data" / "index" / "relationships.sqlite")
 
         index.rebuild_from_scan(store, scan_people_directory(store))
 
-        assert index.get_row("moe-szyslak")["last_interaction_at"] is None
+        assert index.get_row("P0003")["last_interaction_at"] is None
 
     def test_malformed_file_excluded_from_index(self, tmp_path):
         store = _store(tmp_path)
@@ -83,7 +83,7 @@ class TestRebuildFromScan:
 
         index.rebuild_from_scan(store, scan_people_directory(store))
 
-        assert index.all_person_ids() == {"homer-simpson"}
+        assert index.all_person_ids() == {"P0001"}
 
 
 class TestDeleteAndRebuildEquivalence:
@@ -92,7 +92,7 @@ class TestDeleteAndRebuildEquivalence:
         store.write_person(_homer())
         store.write_person(_no_year_birthday_person())
         store.write_person(
-            Person(id="lisa-simpson", name="Lisa Simpson", facts=[Fact(id="fact-1", category="Interests", text="Sax.")])
+            Person(id="P0004", name="Lisa Simpson", facts=[Fact(id="fact-1", category="Interests", text="Sax.")])
         )
         db_path = tmp_path / "data" / "index" / "relationships.sqlite"
 
@@ -127,7 +127,7 @@ class TestIncrementalReconcile:
         assert stats.updated == 0
         assert stats.unchanged == 0
         assert stats.removed == 0
-        assert index.all_person_ids() == {"homer-simpson"}
+        assert index.all_person_ids() == {"P0001"}
 
     def test_unchanged_file_is_not_rewritten(self, tmp_path):
         store = _store(tmp_path)
@@ -155,7 +155,7 @@ class TestIncrementalReconcile:
 
         assert stats.updated == 1
         assert stats.unchanged == 0
-        assert index.get_row("homer-simpson")["summary"] == "Updated summary."
+        assert index.get_row("P0001")["summary"] == "Updated summary."
 
     def test_stats_expose_changed_and_removed_person_ids(self, tmp_path):
         store = _store(tmp_path)
@@ -163,10 +163,10 @@ class TestIncrementalReconcile:
         index = SqliteIndex(tmp_path / "data" / "index" / "relationships.sqlite")
         index.rebuild_from_scan(store, scan_people_directory(store))
 
-        store.write_person(_no_year_birthday_person())  # new: ned-flanders
+        store.write_person(_no_year_birthday_person())  # new: P0002
         stats = index.reconcile(store, scan_people_directory(store))
 
-        assert stats.changed_person_ids == frozenset({"ned-flanders"})
+        assert stats.changed_person_ids == frozenset({"P0002"})
         assert stats.removed_person_ids == frozenset()
 
     def test_archived_person_is_removed_from_index(self, tmp_path):
@@ -175,7 +175,7 @@ class TestIncrementalReconcile:
         index = SqliteIndex(tmp_path / "data" / "index" / "relationships.sqlite")
         index.rebuild_from_scan(store, scan_people_directory(store))
 
-        store.archive_person("homer-simpson")
+        store.archive_person("P0001")
         stats = index.reconcile(store, scan_people_directory(store))
 
         assert stats.removed == 1

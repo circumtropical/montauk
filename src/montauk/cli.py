@@ -15,7 +15,12 @@ from .auth import ENV_VAR_AGENT_TOKEN, CredentialStore, resolve_stdio_identity
 from .bootstrap import build_context, reconcile_on_startup
 from .config import MontaukConfig, load_config
 from .embeddings.local import DEFAULT_MODEL_NAME
-from .git_snapshot import DailySnapshotScheduler, create_initial_commit, ensure_git_repo, snapshot_if_changed
+from .git_snapshot import (
+    DailySnapshotScheduler,
+    create_initial_commit,
+    ensure_git_repo,
+    snapshot_if_changed,
+)
 from .http_app import build_http_app, build_transport_security
 from .logging_config import configure_logging
 from .markdown_store import MarkdownStore
@@ -129,11 +134,13 @@ def init(config: Path | None = ConfigOption, data_dir: Path | None = DataDirOpti
     target = cfg.data_dir_path
 
     # 1. Canonical directory layout (MarkdownStore creates people/ and archive/).
-    MarkdownStore(target)
+    store = MarkdownStore(target)
     for sub in ("people", "archive"):
         keep = target / sub / ".gitkeep"
         if not keep.exists():
             keep.write_text("", encoding="utf-8")
+    # Permanent person-ID high-water mark (canonical, git-tracked).
+    store.id_sequence.initialize()
 
     # 2. Starter config, unless the operator pointed at their own with --config.
     wrote_config = False
@@ -156,7 +163,13 @@ def init(config: Path | None = ConfigOption, data_dir: Path | None = DataDirOpti
     committed = create_initial_commit(
         target,
         message="Initialise Montauk data repository",
-        extra_paths=("README.md", "config.yaml", "people/.gitkeep", "archive/.gitkeep"),
+        extra_paths=(
+            "README.md",
+            "config.yaml",
+            "people/.gitkeep",
+            "archive/.gitkeep",
+            "person-id-sequence.json",
+        ),
     )
 
     typer.echo(f"Initialised Montauk deployment at {target}")
@@ -212,13 +225,48 @@ def status(config: Path | None = ConfigOption, data_dir: Path | None = DataDirOp
     typer.echo(f"last_reconciliation_at: {sqlite_index.get_meta('last_reconciliation_at')}")
 
 
+@app.command(name="migrate-ids")
+def migrate_ids(config: Path | None = ConfigOption, data_dir: Path | None = DataDirOption) -> None:
+    """One-time cutover: convert name-derived person IDs (mike-chen) to
+    permanent generic IDs (P0001) and rewrite every reference. Idempotent
+    -- safe to rerun. Rebuilds the derived indexes afterwards."""
+    from .migration import MigrationError, migrate_person_ids
+
+    cfg = _resolve_config(config, data_dir)
+    store = MarkdownStore(cfg.data_dir_path)
+    try:
+        report = migrate_person_ids(store)
+    except MigrationError as exc:
+        typer.echo(f"migration aborted: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    if not report.changed:
+        typer.echo(f"nothing to migrate: {len(report.already_generic)} person id(s) already generic")
+        return
+
+    for old_id, new_id in sorted(report.migrated.items(), key=lambda kv: kv[1]):
+        typer.echo(f"  {old_id}  ->  {new_id}")
+    typer.echo(
+        f"migrated {len(report.migrated)} person id(s), rewrote {report.references_rewritten} "
+        f"reference(s); backup: {report.backup_ref}"
+    )
+
+    sqlite_index = SqliteIndex(cfg.data_dir_path / "index" / "relationships.sqlite")
+    sqlite_index.rebuild_from_scan(store, scan_people_directory(store))
+    typer.echo("rebuilt SQLite index; run `montauk rebuild-vectors` to rebuild the semantic index")
+    if not report.verified:
+        typer.echo("WARNING: post-migration verification did not pass", err=True)
+        raise typer.Exit(code=1)
+
+
 @app.command(name="rebuild-index")
 def rebuild_index(config: Path | None = ConfigOption, data_dir: Path | None = DataDirOption) -> None:
     """Delete-and-rebuild the derived SQLite index from canonical Markdown."""
     cfg = _resolve_config(config, data_dir)
     store = MarkdownStore(cfg.data_dir_path)
-    sqlite_index = SqliteIndex(cfg.data_dir_path / "index" / "relationships.sqlite")
+    store.sync_id_sequence()
     result = scan_people_directory(store)
+    sqlite_index = SqliteIndex(cfg.data_dir_path / "index" / "relationships.sqlite")
     sqlite_index.rebuild_from_scan(store, result)
     typer.echo(f"rebuilt index: {len(result.valid)} people indexed")
 
