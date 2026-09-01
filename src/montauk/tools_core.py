@@ -18,7 +18,7 @@ from pydantic import ValidationError as PydanticValidationError
 
 from .auth import AgentIdentity, CredentialStore, resolve_http_identity, require_write
 from .errors import ArchivedError, MontaukValidationError, NotFoundError
-from .ids import next_fact_id, next_interaction_id, next_person_id
+from .ids import PERSON_ID_RE, next_fact_id, next_interaction_id, next_person_id
 from .markdown_store import MarkdownStore, PersonNotFoundError, person_to_markdown
 from .models import ContactInfo, Fact, Interaction, Person, Source
 from .schema import CATEGORIES
@@ -43,6 +43,30 @@ from .tool_types import (
 from .write_queue import WriteQueue
 
 logger = logging.getLogger(__name__)
+
+# Record-scoping guidance (spec section 15). A source may be about several
+# people, but a Montauk record is about exactly one. These strings are
+# spliced into the model-visible descriptions of every mutation tool that
+# accepts narrative content, so an agent that never reads the server
+# instructions still sees the locally relevant part of the rule.
+RECORD_SCOPING_RULE = (
+    "Content must be directly relevant to the specified person_id. Do not include people "
+    "or details merely because they appeared in the same conversation or source event. "
+    "Cross-person references are appropriate only when the source establishes a direct "
+    "relationship or interaction, or when the reference is necessary to understand a fact "
+    "directly about the person of record."
+)
+BATCH_SEPARATION_RULE = (
+    "If one source contains information about multiple unrelated people, create a separate "
+    "batch for each person and include only the operations relevant to that person."
+)
+INTERACTION_SCOPING_RULE = (
+    "An interaction summary should describe the person of record's participation and only "
+    "the context necessary to understand that interaction. Other participants may be named "
+    "only when the person of record actually interacted with them or has a relevant "
+    "relationship with them. Unrelated people discussed in the source material must not be "
+    "included."
+)
 
 
 @dataclass
@@ -82,6 +106,35 @@ def _load_person_or_error(store: MarkdownStore, person_id: str) -> Person:
                 f"person {person_id!r} is archived; use get_archived_person or list_archived_people"
             ) from None
         raise NotFoundError(f"person {person_id!r} not found") from None
+
+
+def _validate_related_person_id(
+    ctx: MontaukContext, owner_person_id: str, related_person_id: str | None
+) -> None:
+    """A structured relationship reference must point at exactly one real
+    other person (spec section 15). This does not police narrative text --
+    it only constrains the explicit `related_person_id` field: it must be a
+    well-formed person id, must not be the record's own id, and must
+    resolve to an existing (active or archived) person. Legitimate
+    relationship facts remain fully expressible; only dangling or
+    free-form references are rejected, before any write happens."""
+    if related_person_id is None:
+        return
+    if related_person_id == owner_person_id:
+        raise MontaukValidationError(
+            f"related_person_id {related_person_id!r} is the record's own person; a record "
+            "is about exactly one person"
+        )
+    if not PERSON_ID_RE.match(related_person_id):
+        raise MontaukValidationError(
+            f"related_person_id {related_person_id!r} is not a valid person id (pass an "
+            "existing person_id, not a name)"
+        )
+    if not (ctx.store.exists(related_person_id) or ctx.store.is_archived(related_person_id)):
+        raise MontaukValidationError(
+            f"related_person_id {related_person_id!r} does not refer to an existing person; "
+            "search for or create that person first, or omit the reference"
+        )
 
 
 def _person_core(person: Person) -> PersonCore:
@@ -238,7 +291,8 @@ def register_batch_tools(server: MCPServer, ctx: MontaukContext) -> None:
             "update_contact_details, update_summary, set_birthday, and set_contact_cadence "
             "operations. The entire batch is validated before any change is written -- if any "
             "operation is invalid, none of them are applied. Prefer this over separate tool calls "
-            "when one interaction or source event produces several related updates for one person."
+            "when one interaction or source event produces several related updates for one person. "
+            f"{RECORD_SCOPING_RULE} {BATCH_SEPARATION_RULE}"
         )
     )
     async def update_person_batch(
@@ -248,6 +302,9 @@ def register_batch_tools(server: MCPServer, ctx: MontaukContext) -> None:
 
         def op_fn() -> WriteResult:
             person = _load_person_or_error(store, person_id)
+            for operation in operations:
+                if isinstance(operation, (AddFactOp, UpdateFactOp)):
+                    _validate_related_person_id(ctx, person_id, operation.related_person_id)
             working = person
             seen_fact_ids = set(person.fact_ids())
             seen_interaction_ids = set(person.interaction_ids())
@@ -376,7 +433,8 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
             "exist -- do not use this tool to resolve identity uncertainty; if search returns "
             "plausible candidates, ask the user to clarify instead of creating a duplicate. The "
             "returned person_id is permanent and should be used for all subsequent operations on "
-            "this person."
+            "this person. The initial summary must describe only this person -- do not fold in "
+            "details about other people who happened to appear in the same source."
         )
     )
     async def create_person(
@@ -419,7 +477,8 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
             "Add a new fact to a known person_id in one fixed category "
             f"({', '.join(CATEGORIES)}). Use high confidence for directly stated or strongly "
             "supported facts; medium/low for genuine inference or uncertainty. Set "
-            "related_person_id only when this fact concerns another existing person by ID."
+            "related_person_id only when this fact concerns another existing person by ID. "
+            f"{RECORD_SCOPING_RULE}"
         )
     )
     async def add_fact(
@@ -436,6 +495,7 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
 
         def op() -> WriteResult:
             person = _load_person_or_error(store, person_id)
+            _validate_related_person_id(ctx, person_id, related_person_id)
             fact_id = next_fact_id(person.fact_ids())
             try:
                 new_fact = Fact(
@@ -459,7 +519,8 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
         description=(
             "Update fields on an existing fact by person_id and fact_id. Only fields you pass are "
             "changed; omitted fields keep their current value (this tool cannot clear a field to "
-            "empty -- use remove_fact and add_fact for that)."
+            "empty -- use remove_fact and add_fact for that). "
+            f"{RECORD_SCOPING_RULE}"
         )
     )
     async def update_fact(
@@ -479,6 +540,7 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
             existing = person.get_fact(fact_id)
             if existing is None:
                 raise NotFoundError(f"fact {fact_id!r} not found on person {person_id!r}")
+            _validate_related_person_id(ctx, person_id, related_person_id)
             field_updates = {
                 k: v
                 for k, v in {
@@ -525,7 +587,8 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
         description=(
             "Record a concise interaction summary for a known person_id. Worth calling even when the "
             "interaction produced no new facts -- interactions drive contact-recency/cadence queries "
-            "regardless. Do not pass a raw transcript or message thread; summarize concisely."
+            "regardless. Do not pass a raw transcript or message thread; summarize concisely. "
+            f"{INTERACTION_SCOPING_RULE}"
         )
     )
     async def record_interaction(
@@ -599,7 +662,12 @@ def register_core_tools(server: MCPServer, ctx: MontaukContext) -> None:
 
         return await write_queue.submit(op)
 
-    @server.tool(description="Replace the short identifying summary for a known person_id.")
+    @server.tool(
+        description=(
+            "Replace the short identifying summary for a known person_id. "
+            f"{RECORD_SCOPING_RULE}"
+        )
+    )
     async def update_summary(person_id: str, summary: str, mcp_ctx: Context) -> WriteResult:
         _authorize_write(ctx, mcp_ctx)
 

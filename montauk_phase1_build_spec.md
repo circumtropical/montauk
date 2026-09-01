@@ -336,6 +336,24 @@ External agents may explicitly submit medium- or low-confidence facts in Phase 1
 
 - Not every spouse, child, or relative must have a separate person record.
 
+### 15.1 Record-Scoped Relevance and Unrelated People
+
+Governing principle: **a source may be about several people; a Montauk record is about exactly one person.**
+
+- Each person record must contain only information directly relevant to that person.
+
+- Conversational or source-level co-occurrence does not establish a relationship. Two people appearing in the same conversation, note, meeting, message, or source event are not thereby related, and the server never infers a relationship from co-occurrence alone.
+
+- A fact, summary, note, or interaction stored for one person may identify another person only when the source supports it: the person of record knows / has met / communicated with / otherwise has a direct relationship with the other person; or the source describes an actual interaction involving both; or the information explicitly concerns the relationship between the two; or naming the other person is necessary to understand a fact directly about the person of record.
+
+- A legitimate relationship or interaction can be a single meeting, introduction, professional contact, transaction, or shared activity -- it need not be friendship or a long-standing tie. The rule prevents unsupported associations; it does not require closeness.
+
+- When one source contains information about multiple unrelated people, separate the information by subject and produce an independent one-person update for each person, including only subject-relevant information and omitting unrelated surrounding context.
+
+- If the relationship or relevance is uncertain, omit the cross-person reference or ask the user to clarify.
+
+This rule is communicated to agents through the server instructions (`RECORD SCOPING`) and repeated in the descriptions of every mutation tool that accepts narrative content. Structurally, every mutation still targets exactly one `person_id`, a one-person batch cannot mutate multiple records, and an explicit `related_person_id` must resolve to a real existing person (spec section 15); the semantic judgement of relevance is the agent's, guided by that published text.
+
 ## 16. Archive Semantics
 
 - Normal lifecycle removal is archive, not delete.
@@ -573,6 +591,13 @@ RECORDING INFORMATION
 - When one event produces several related changes for one person, prefer the atomic one-person batch update.
 - Use high confidence for directly stated or strongly supported facts; use medium or low confidence for genuine inference or uncertainty.
 
+RECORD SCOPING
+- Keep each record scoped to the person of record.
+- Mention another person only when that person has a direct relationship or interaction with the person of record, or when the reference is necessary to understand a fact directly about the person of record.
+- People appearing in the same conversation or source material are not necessarily related. Never infer a relationship from co-occurrence.
+- When one source discusses several unrelated people, separate the information by subject and update each person independently.
+- Omit unrelated surrounding context. If relevance is uncertain, omit the reference or ask the user to clarify.
+
 RETRIEVAL
 - Prefer targeted retrieval for a specific question.
 - Request the full record only when the complete record is useful.
@@ -595,7 +620,9 @@ Critical workflow hints should be repeated in the descriptions of the tools to w
 
 - Mutation tools should require person_id rather than accepting a free-form name as identity.
 
-- update_person_batch should state that it is atomic, applies to exactly one person, validates the whole batch first, and is preferred for multiple related changes from one source event.
+- update_person_batch should state that it is atomic, applies to exactly one person, validates the whole batch first, and is preferred for multiple related changes from one source event. It should also state that a source about several unrelated people must be split into a separate batch per person.
+
+- Every mutation tool that accepts narrative content (add_fact, update_fact, record_interaction, update_summary, update_person_batch, create_person's initial summary) should repeat the record-scoping rule from section 15.1: content must be directly relevant to the target person, and another person may be named only on source-supported relevance, never on co-occurrence. record_interaction should additionally state that unrelated people discussed in the surrounding source must not appear in the interaction summary.
 
 - get_person and get_facts should make clear that targeted retrieval is preferred when the caller does not need the complete record.
 

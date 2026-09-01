@@ -29,6 +29,13 @@ RECORDING INFORMATION
 - When one event produces several related changes for one person, prefer the atomic one-person batch update.
 - Use high confidence for directly stated or strongly supported facts; use medium or low confidence for genuine inference or uncertainty.
 
+RECORD SCOPING
+- Keep each record scoped to the person of record.
+- Mention another person only when that person has a direct relationship or interaction with the person of record, or when the reference is necessary to understand a fact directly about the person of record.
+- People appearing in the same conversation or source material are not necessarily related. Never infer a relationship from co-occurrence.
+- When one source discusses several unrelated people, separate the information by subject and update each person independently.
+- Omit unrelated surrounding context. If relevance is uncertain, omit the reference or ask the user to clarify.
+
 RETRIEVAL
 - Prefer targeted retrieval for a specific question.
 - Request the full record only when the complete record is useful.
