@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 
 from ..base import LLMError, LLMNotConfigured, LLMResult, LLMTimeout
@@ -19,7 +20,9 @@ from ..base import LLMError, LLMNotConfigured, LLMResult, LLMTimeout
 _DEFAULT_TIMEOUT = 180.0
 
 
-async def _run(argv: list[str], *, stdin: str, timeout: float) -> tuple[int, str, str]:
+async def _run(
+    argv: list[str], *, stdin: str, timeout: float, env: dict[str, str] | None = None
+) -> tuple[int, str, str]:
     if shutil.which(argv[0]) is None:
         raise LLMNotConfigured(f"{argv[0]!r} CLI is not installed on this host")
     try:
@@ -28,6 +31,7 @@ async def _run(argv: list[str], *, stdin: str, timeout: float) -> tuple[int, str
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env={**os.environ, **env} if env else None,
         )
         out, err = await asyncio.wait_for(proc.communicate(stdin.encode("utf-8")), timeout)
     except TimeoutError as exc:
@@ -39,6 +43,12 @@ async def _run(argv: list[str], *, stdin: str, timeout: float) -> tuple[int, str
 
 class ClaudeCLIProvider:
     provider_type = "claude_cli"
+
+    # Every Montauk LLM task is compression/extraction of supplied evidence, not
+    # open-ended reasoning. Claude Code turns on extended thinking by default for
+    # 4.5+ models, which spent ~8k thinking tokens (~90s) on a one-paragraph
+    # briefing; MAX_THINKING_TOKENS=0 turns it off and the same call runs in ~6s.
+    _ENV = {"MAX_THINKING_TOKENS": "0"}
 
     def __init__(self, *, model: str, binary: str = "claude", timeout: float = _DEFAULT_TIMEOUT) -> None:
         self.model = model
@@ -59,7 +69,7 @@ class ClaudeCLIProvider:
             "--disallowedTools",
             "*",
         ]
-        code, out, err = await _run(argv, stdin=prompt, timeout=self._timeout)
+        code, out, err = await _run(argv, stdin=prompt, timeout=self._timeout, env=self._ENV)
         try:
             data = json.loads(out)
         except ValueError as exc:

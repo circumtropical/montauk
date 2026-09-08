@@ -94,8 +94,9 @@ class TestClaudeCLI:
             "usage": {"input_tokens": 5, "cache_read_input_tokens": 100, "output_tokens": 20},
         }
 
-        async def fake_run(argv, *, stdin, timeout):
+        async def fake_run(argv, *, stdin, timeout, env=None):
             assert argv[0] == "claude" and "--system-prompt" in argv
+            assert (env or {}).get("MAX_THINKING_TOKENS") == "0"  # extended thinking off
             return 0, json.dumps(canned), ""
 
         monkeypatch.setattr(cli_mod, "_run", fake_run)
@@ -105,7 +106,7 @@ class TestClaudeCLI:
         assert r.reported_cost_usd == 0.0012
 
     async def test_error_output_raises(self, monkeypatch):
-        async def fake_run(argv, *, stdin, timeout):
+        async def fake_run(argv, *, stdin, timeout, env=None):
             return 1, json.dumps({"is_error": True, "result": "auth failed"}), ""
 
         monkeypatch.setattr(cli_mod, "_run", fake_run)
