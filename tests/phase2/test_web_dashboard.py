@@ -101,7 +101,19 @@ class TestAuth:
     def test_security_headers_present(self, client):
         r = client.get("/setup")
         assert r.headers["x-frame-options"] == "DENY"
-        assert "default-src 'self'" in r.headers["content-security-policy"]
+        csp = r.headers["content-security-policy"]
+        assert "default-src 'self'" in csp
+        assert (
+            "script-src 'self'" in csp and "'unsafe-inline'" not in csp.split("script-src")[1].split(";")[0]
+        )
+
+    def test_password_reveal_is_wired_but_not_inline_script(self, client):
+        html = client.get("/login").text
+        assert 'type="password"' in html and "data-reveal" in html
+        assert "/static/montauk.js" in html
+        # no inline <script> that would need 'unsafe-inline'
+        assert "<script>" not in html
+        assert client.get("/static/montauk.js").status_code == 200
 
 
 class TestWithMigratedData:
@@ -183,6 +195,67 @@ class TestWithMigratedData:
 
     def test_missing_person_is_404_not_500(self, populated):
         assert populated.get("/people/P9999").status_code == 404
+
+    def test_person_page_has_editable_structured_fields(self, populated):
+        html = populated.get("/people/P0001").text
+        assert 'action="/people/P0001/edit"' in html
+        for field in ("name", "aliases", "birthday", "location", "emails", "address"):
+            assert f'name="{field}"' in html
+
+    def _edit(self, client, pid, **fields):
+        base = {
+            k: v
+            for k, v in {
+                "name": fields.pop("name", "X"),
+                "aliases": fields.pop("aliases", ""),
+                "birthday": fields.pop("birthday", ""),
+                "location": fields.pop("location", ""),
+                "company": fields.pop("company", ""),
+                "job_title": fields.pop("job_title", ""),
+                "desired_contact_cadence_days": fields.pop("cadence", ""),
+                "summary": fields.pop("summary", ""),
+                "emails": fields.pop("emails", ""),
+                "phones": fields.pop("phones", ""),
+                "address": fields.pop("address", ""),
+                "messaging": fields.pop("messaging", ""),
+            }.items()
+        }
+        base["_csrf"] = _csrf(client, f"/people/{pid}")
+        return client.post(f"/people/{pid}/edit", data=base, follow_redirects=False)
+
+    def test_edit_stores_partial_location_and_month_only_birthday(self, populated):
+        r = self._edit(populated, "P0002", name="Dana Whitfield", location="Boston", birthday="03")
+        assert r.status_code == 303
+        page = populated.get("/people/P0002").text
+        assert 'value="Boston"' in page
+        assert 'value="03"' in page  # month-only birthday round-trips
+        # markdown export reflects the partial values
+        md = populated.get("/export/person/P0002.md").text
+        assert "location: Boston" in md and "birthday: '03'" in md.replace('"', "'")
+
+    def test_edit_updates_aliases_emails_address_and_logs_revisions(self, populated):
+        r = self._edit(
+            populated,
+            "P0003",
+            name="Marco Reyes",
+            aliases="Marc\nReyes",
+            emails="marco@example.com\nm.reyes@work.example",
+            address="Cambridge, MA",
+        )
+        assert r.status_code == 303
+        page = populated.get("/people/P0003").text
+        assert "Marc" in page and "marco@example.com" in page and "Cambridge, MA" in page
+        assert "person.aliases" in page or "person.contact" in page  # revision rows rendered
+
+    def test_edit_rejects_bad_birthday_without_saving(self, populated):
+        r = self._edit(populated, "P0001", name="Dana Whitfield", birthday="2026-13-40")
+        assert r.status_code == 400
+        assert "birthday" in r.text.lower()
+        assert "2026-13-40" not in populated.get("/export/person/P0001.md").text
+
+    def test_edit_rejects_non_numeric_cadence(self, populated):
+        r = self._edit(populated, "P0001", name="Dana Whitfield", cadence="soon")
+        assert r.status_code == 400
 
     def test_transcripts_page_shows_degraded_state(self, populated):
         assert "No inbound connectors" in populated.get("/transcripts").text

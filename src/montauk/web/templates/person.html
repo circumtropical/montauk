@@ -8,23 +8,59 @@
   <p class="muted">{{ p.id }}{% if p.aliases %} &middot; aka {{ p.aliases|join(', ') }}{% endif %}</p>
 
   <div class="card">
-    <h2>Overview</h2>
-    {% if p.summary %}<p>{{ p.summary }}</p>{% endif %}
-    <table>
-      {% if p.birthday %}<tr><th>Birthday</th><td>{{ p.birthday.to_string() }}</td></tr>{% endif %}
-      {% if p.company %}<tr><th>Company</th><td>{{ p.company }}</td></tr>{% endif %}
-      {% if p.job_title %}<tr><th>Job title</th><td>{{ p.job_title }}</td></tr>{% endif %}
-      {% if p.location %}<tr><th>Location</th><td>{{ p.location }}</td></tr>{% endif %}
-      {% if p.desired_contact_cadence_days %}<tr><th>Contact cadence</th><td>every {{ p.desired_contact_cadence_days }} days</td></tr>{% endif %}
-      {% if contact.emails %}<tr><th>Email</th><td>{{ contact.emails|join(', ') }}</td></tr>{% endif %}
-      {% if contact.phones %}<tr><th>Phone</th><td>{{ contact.phones|join(', ') }}</td></tr>{% endif %}
-      {% if contact.address %}<tr><th>Address</th><td>{{ contact.address }}</td></tr>{% endif %}
-      {% for k, v in contact.messaging.items() %}<tr><th>{{ k }}</th><td>{{ v }}</td></tr>{% endfor %}
-    </table>
-    <p style="margin-top:0.8rem">
-      <a class="button secondary" href="/export/person/{{ p.id }}.md">Export .md</a>
-      <a class="button secondary" href="/export/person/{{ p.id }}.json">Export .json</a>
-    </p>
+    <h2>Overview &amp; structured fields</h2>
+    {% if edit_error %}<div class="notice error" role="alert">{{ edit_error }}</div>{% endif %}
+    <p class="muted">Every field is optional and accepts partial information &mdash; e.g. a
+      location of just &ldquo;Boston&rdquo;, or a birthday of just <code>03</code> (March, day and
+      year unknown).</p>
+    <form method="post" action="/people/{{ p.id }}/edit" class="edit-grid">
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+
+      <div><label for="f-name">Name</label>
+        <input type="text" id="f-name" name="name" value="{{ form.name }}" required></div>
+      <div><label for="f-birthday">Birthday</label>
+        <input type="text" id="f-birthday" name="birthday" value="{{ form.birthday }}"
+          placeholder="YYYY-MM-DD · YYYY-MM · MM-DD · MM"></div>
+
+      <div><label for="f-company">Company</label>
+        <input type="text" id="f-company" name="company" value="{{ form.company }}"></div>
+      <div><label for="f-job">Job title</label>
+        <input type="text" id="f-job" name="job_title" value="{{ form.job_title }}"></div>
+
+      <div><label for="f-location">Location</label>
+        <input type="text" id="f-location" name="location" value="{{ form.location }}"
+          placeholder="e.g. Boston (partial is fine)"></div>
+      <div><label for="f-cadence">Keep-in-touch cadence (days)</label>
+        <input type="number" min="1" id="f-cadence" name="desired_contact_cadence_days"
+          value="{{ form.desired_contact_cadence_days }}"></div>
+
+      <div class="wide"><label for="f-aliases">Aliases (one per line)</label>
+        <textarea id="f-aliases" name="aliases" rows="2">{{ form.aliases }}</textarea></div>
+
+      <div class="wide"><label for="f-summary">Summary</label>
+        <textarea id="f-summary" name="summary" rows="2">{{ form.summary }}</textarea></div>
+
+      <div><label for="f-emails">Email addresses (one per line)</label>
+        <textarea id="f-emails" name="emails" rows="2">{{ form.emails }}</textarea></div>
+      <div><label for="f-phones">Phone numbers (one per line)</label>
+        <textarea id="f-phones" name="phones" rows="2">{{ form.phones }}</textarea></div>
+
+      <div class="wide"><label for="f-address">Physical address</label>
+        <input type="text" id="f-address" name="address" value="{{ form.address }}"
+          placeholder="Street, city, or as much as you know"></div>
+
+      <div class="wide"><label for="f-messaging">Messaging handles (<code>platform: handle</code>, one per line)</label>
+        <textarea id="f-messaging" name="messaging" rows="2">{{ form.messaging }}</textarea></div>
+
+      <div class="wide"><label for="f-reason">Change note (optional, saved to history)</label>
+        <input type="text" id="f-reason" name="_reason"></div>
+
+      <div class="wide">
+        <button type="submit">Save fields</button>
+        <a class="button secondary" href="/export/person/{{ p.id }}.md">Export .md</a>
+        <a class="button secondary" href="/export/person/{{ p.id }}.json">Export .json</a>
+      </div>
+    </form>
   </div>
 
   <div class="card facts">

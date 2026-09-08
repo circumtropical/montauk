@@ -18,6 +18,7 @@ _FULL_RE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
 _MONTH_RE = re.compile(r"^(\d{4})-(\d{2})$")
 _YEAR_RE = re.compile(r"^(\d{4})$")
 _MONTH_DAY_RE = re.compile(r"^(\d{2})-(\d{2})$")
+_BARE_MONTH_RE = re.compile(r"^(\d{1,2})$")
 
 
 class DatePrecision(str, Enum):
@@ -147,22 +148,34 @@ class FlexDate:
 
 @dataclass(frozen=True, slots=True)
 class Birthday:
-    """A birthday: month and day are always known; year is optional."""
+    """A birthday with variable precision: the month is always known; the
+    day and the year are each optional (spec sections 8.2, "partial
+    precision supported"). Supported precisions:
+
+    * ``YYYY-MM-DD`` -- full date
+    * ``YYYY-MM``    -- year and month, day unknown
+    * ``MM-DD``      -- month and day, year unknown
+    * ``MM``         -- month only ("born in March", day and year unknown)
+    """
 
     month: int
-    day: int
+    day: int | None = None
     year: int | None = None
 
     def __post_init__(self) -> None:
         _require_valid_month(self.month)
-        if self.year is not None:
-            if not (1 <= self.year <= 9999):
-                raise ValueError(f"invalid birthday year {self.year}: must be 1-9999")
-            _require_valid_calendar_date(self.year, self.month, self.day)
-        else:
-            # No year known: validate day against a leap year so Feb 29
-            # birthdays remain representable without pinning a year.
-            _require_valid_calendar_date(2000, self.month, self.day)
+        if self.year is not None and not (1 <= self.year <= 9999):
+            raise ValueError(f"invalid birthday year {self.year}: must be 1-9999")
+        if self.day is not None:
+            # Validate against the known year, or a leap year so Feb 29
+            # birthdays stay representable without pinning a year.
+            _require_valid_calendar_date(self.year or 2000, self.month, self.day)
+
+    @property
+    def precision(self) -> DatePrecision:
+        if self.day is not None:
+            return DatePrecision.DAY
+        return DatePrecision.MONTH
 
     @classmethod
     def parse(cls, value: Any) -> Birthday:
@@ -172,6 +185,8 @@ class Birthday:
             value = value.date()
         if isinstance(value, dt.date):
             return cls(value.month, value.day, value.year)
+        if isinstance(value, int):
+            return cls(value)
         if isinstance(value, str):
             s = value.strip()
             if not s:
@@ -179,25 +194,38 @@ class Birthday:
             if m := _FULL_RE.match(s):
                 y, mo, d = (int(g) for g in m.groups())
                 return cls(mo, d, y)
+            if m := _MONTH_RE.match(s):
+                y, mo = (int(g) for g in m.groups())
+                return cls(mo, None, y)
             if m := _MONTH_DAY_RE.match(s):
                 mo, d = (int(g) for g in m.groups())
                 return cls(mo, d, None)
-            raise ValueError(f"unrecognized birthday format {s!r}: expected YYYY-MM-DD or MM-DD")
+            if m := _BARE_MONTH_RE.match(s):
+                return cls(int(m.group(1)), None, None)
+            raise ValueError(
+                f"unrecognized birthday format {s!r}: expected YYYY-MM-DD, YYYY-MM, MM-DD, or MM"
+            )
         raise ValueError(f"unsupported birthday value type {type(value).__name__}: {value!r}")
 
     def to_string(self) -> str:
-        if self.year is not None:
+        if self.year is not None and self.day is not None:
             return f"{self.year:04d}-{self.month:02d}-{self.day:02d}"
-        return f"{self.month:02d}-{self.day:02d}"
+        if self.year is not None:
+            return f"{self.year:04d}-{self.month:02d}"
+        if self.day is not None:
+            return f"{self.month:02d}-{self.day:02d}"
+        return f"{self.month:02d}"
 
     def next_occurrence(self, today: dt.date) -> dt.date:
-        """The next occurrence of this birthday on or after `today`.
+        """The next occurrence of this birthday on or after ``today``.
 
-        A Feb 29 birthday is observed on Feb 28 in non-leap years.
+        A Feb 29 birthday is observed on Feb 28 in non-leap years. A
+        month-only birthday is anchored to the first of the month.
         """
+        anchor_day = self.day or 1
         for candidate_year in (today.year, today.year + 1):
-            day = self.day
-            if self.month == 2 and self.day == 29 and not calendar.isleap(candidate_year):
+            day = anchor_day
+            if self.month == 2 and anchor_day == 29 and not calendar.isleap(candidate_year):
                 day = 28
             occurrence = dt.date(candidate_year, self.month, day)
             if occurrence >= today:

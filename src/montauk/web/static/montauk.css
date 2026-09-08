@@ -100,6 +100,20 @@ pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px
 
 .token { word-break: break-all; background: var(--bg); border: 1px solid var(--warn-border); padding: 0.6rem; border-radius: 6px; }
 
+.edit-grid { display: grid; gap: 0.8rem 1rem; grid-template-columns: 1fr 1fr; }
+.edit-grid .wide { grid-column: 1 / -1; }
+.edit-grid textarea { resize: vertical; }
+@media (max-width: 560px) { .edit-grid { grid-template-columns: 1fr; } }
+
+.pw-field { position: relative; }
+.pw-field input { padding-right: 2.6rem; }
+.pw-toggle {
+  position: absolute; right: 0.3rem; top: 50%; transform: translateY(-50%);
+  background: transparent; border: 0; padding: 0.3rem 0.4rem; cursor: pointer;
+  color: var(--muted); font-size: 1rem; line-height: 1;
+}
+.pw-toggle:hover { color: var(--text); }
+
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (max-width: 640px) {
   .topbar { gap: 0.5rem; }

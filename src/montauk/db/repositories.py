@@ -284,6 +284,66 @@ class PeopleRepository:
         self.session.flush()
         self._rebuild_children(row, domain, authority=authority, related_map="resolve")
 
+    def update_core_fields(
+        self,
+        row: orm.Person,
+        domain: DomainPerson,
+        *,
+        reason: str | None = None,
+    ) -> None:
+        """Update only the structured fields (name, aliases, birthday,
+        location, company, job_title, cadence, summary, contact methods)
+        from a validated domain model. Facts and interactions on ``domain``
+        are ignored -- their rows are left untouched. Field-level revisions
+        are recorded for every change (spec 20.2). Owner-curated authority.
+
+        Empty / omitted values are stored as NULL, so partial information is
+        first-class: a location of just "Boston", a birthday of just "03".
+        """
+        before = mapping.person_to_domain(row)
+        self._diff_scalars(row, before, domain, authority="owner_curated", reason=reason)
+
+        row.name = domain.name
+        row.birthday_month = domain.birthday.month if domain.birthday else None
+        row.birthday_day = domain.birthday.day if domain.birthday else None
+        row.birthday_year = domain.birthday.year if domain.birthday else None
+        row.location = domain.location
+        row.company = domain.company
+        row.job_title = domain.job_title
+        row.desired_contact_cadence_days = domain.desired_contact_cadence_days
+        row.summary = domain.summary
+
+        if before.contact.model_dump() != domain.contact.model_dump():
+            self._log(
+                entity_type="person",
+                entity_id=row.id,
+                person_id=row.id,
+                field="contact",
+                old=before.contact.model_dump(),
+                new=domain.contact.model_dump(),
+                authority="owner_curated",
+                reason=reason,
+            )
+
+        row.aliases.clear()
+        row.contact_methods.clear()
+        self.session.flush()
+
+        for pos, alias in enumerate(domain.aliases):
+            row.aliases.append(
+                orm.PersonAlias(
+                    workspace_id=self.workspace_id,
+                    alias=alias,
+                    alias_normalized=normalize_alias(alias),
+                    position=pos,
+                )
+            )
+        for method in mapping.contact_methods_from_info(
+            domain.contact, workspace_id=self.workspace_id, person_id=row.id
+        ):
+            row.contact_methods.append(method)
+        self.session.flush()
+
     # -- internals --
 
     def _rebuild_children(

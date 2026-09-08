@@ -100,11 +100,23 @@ class TestBirthdayParse:
         b = Birthday.parse("02-29")
         assert (b.month, b.day, b.year) == (2, 29, None)
 
-    def test_round_trip(self):
-        assert Birthday.parse("1982-04-17").to_string() == "1982-04-17"
-        assert Birthday.parse("04-17").to_string() == "04-17"
+    def test_month_only(self):
+        b = Birthday.parse("03")
+        assert (b.year, b.month, b.day) == (None, 3, None)
+        assert b.precision.value == "month"
 
-    @pytest.mark.parametrize("bad", ["", "13-01", "02-30", "2026", "not-a-date"])
+    def test_single_digit_month_only(self):
+        assert Birthday.parse("3").to_string() == "03"
+
+    def test_year_and_month_no_day(self):
+        b = Birthday.parse("1990-03")
+        assert (b.year, b.month, b.day) == (1990, 3, None)
+
+    def test_round_trip(self):
+        for s in ("1982-04-17", "04-17", "1990-03", "03"):
+            assert Birthday.parse(s).to_string() == s
+
+    @pytest.mark.parametrize("bad", ["", "13-01", "02-30", "2026", "13", "0", "not-a-date"])
     def test_rejects_malformed(self, bad):
         with pytest.raises(ValueError):
             Birthday.parse(bad)
@@ -120,6 +132,10 @@ class TestBirthdayNextOccurrence:
         b = Birthday.parse("01-15")
         today = dt.date(2026, 8, 30)
         assert b.next_occurrence(today) == dt.date(2027, 1, 15)
+
+    def test_month_only_anchors_to_first_of_month(self):
+        b = Birthday.parse("03")
+        assert b.next_occurrence(dt.date(2026, 1, 1)) == dt.date(2026, 3, 1)
 
     def test_today_counts_as_upcoming(self):
         b = Birthday.parse("08-30")

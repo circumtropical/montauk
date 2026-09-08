@@ -69,8 +69,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers.setdefault("Referrer-Policy", "same-origin")
         response.headers.setdefault(
             "Content-Security-Policy",
-            "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
-            "form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+            # script-src stays strict ('self' only, no inline). style-src
+            # allows inline style attributes for small layout tweaks in the
+            # templates -- no script execution risk.
+            "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; "
+            "script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
         )
         return response
 

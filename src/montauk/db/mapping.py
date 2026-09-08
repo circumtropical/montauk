@@ -126,7 +126,7 @@ def contact_info_from_methods(methods: Iterable[orm.PersonContactMethod]) -> Con
 
 def person_to_domain(row: orm.Person) -> Person:
     birthday = None
-    if row.birthday_month is not None and row.birthday_day is not None:
+    if row.birthday_month is not None:
         birthday = Birthday(month=row.birthday_month, day=row.birthday_day, year=row.birthday_year)
 
     facts = [
