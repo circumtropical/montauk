@@ -84,6 +84,47 @@ def db_session(session_maker: sessionmaker[Session], _truncate: None) -> Iterato
     session = session_maker()
     try:
         yield session
-        session.commit()
+        try:
+            session.commit()
+        except Exception:
+            session.rollback()
     finally:
         session.close()
+
+
+@pytest.fixture
+def make_workspace(db_session: Session):
+    from montauk.db import models as orm
+
+    def _make(name: str = "Test Workspace") -> orm.Workspace:
+        from montauk.services.workspace import get_or_create_workspace
+
+        ws = get_or_create_workspace(db_session, name)
+        db_session.flush()
+        return ws
+
+    return _make
+
+
+@pytest.fixture
+def workspace(make_workspace):
+    return make_workspace("Alpha")
+
+
+@pytest.fixture
+def other_workspace(make_workspace):
+    return make_workspace("Beta")
+
+
+@pytest.fixture
+def scope(db_session: Session, workspace):
+    from montauk.db.repositories import Actor, WorkspaceScope
+
+    return WorkspaceScope(db_session, workspace.id, Actor("owner", "owner@example.com"))
+
+
+@pytest.fixture
+def other_scope(db_session: Session, other_workspace):
+    from montauk.db.repositories import Actor, WorkspaceScope
+
+    return WorkspaceScope(db_session, other_workspace.id, Actor("owner", "owner@example.com"))
