@@ -23,7 +23,7 @@ from ...db.repositories import (
 from ...errors import MontaukValidationError
 from ...models import ContactInfo, Person, Source
 from ...schema import CATEGORIES, Confidence
-from ...services import summaries
+from ...services import model_config, summaries
 from ...services.auth import AuthContext
 from ...services.summaries import DETAIL_LEVELS as SUMMARY_DETAIL_LEVELS
 from ..app import TEMPLATES, get_state
@@ -230,6 +230,9 @@ def _render_person(
             summary_result=summary_result,
             cached_summaries=cached_summaries,
             summary_detail_levels=SUMMARY_DETAIL_LEVELS,
+            summarization_configured=model_config.is_configured(
+                scope.session, scope.workspace_id, "summarization"
+            ),
         ),
         status_code=status_code,
     )

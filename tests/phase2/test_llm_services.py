@@ -226,6 +226,12 @@ class TestSummaries:
         )
         assert r1.generated and r1.status == "ok" and r1.body == "Dana is a robotics engineer."
         assert len(fake.calls) == 1
+        # debug fields populated on a fresh generation
+        assert r1.system_prompt and "Do NOT produce tasks" in r1.system_prompt
+        sent_system, sent_prompt = fake.calls[0]
+        assert r1.user_prompt == sent_prompt
+        assert "Staff engineer at Nimbus Robotics." in r1.user_prompt  # whole record sent
+        assert r1.evidence_item_count == 3 and r1.input_tokens and r1.latency_ms is not None
 
         # second call is served from cache -- provider not hit again
         r2 = await summaries.generate_summary(

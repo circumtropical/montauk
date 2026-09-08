@@ -183,6 +183,11 @@ def _existing_key(session: Session, workspace_id: uuid.UUID, purpose: str) -> bo
     return bool(row and row.api_key_ciphertext)
 
 
+def is_configured(session: Session, workspace_id: uuid.UUID, purpose: str) -> bool:
+    row = get_row(session, workspace_id, purpose)
+    return bool(row and row.enabled and row.provider_type != "none" and row.model)
+
+
 def any_configured(session: Session, workspace_id: uuid.UUID) -> bool:
     return (
         session.execute(

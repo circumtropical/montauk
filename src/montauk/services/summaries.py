@@ -66,6 +66,19 @@ class SummaryResult:
     note: str | None = None
     revision_refs: list[str] = field(default_factory=list)
 
+    # Debug/inspection fields (spec 18: processing runs record model/prompt
+    # version, counts, usage). Populated on a fresh generation.
+    system_prompt: str | None = None
+    user_prompt: str | None = None
+    evidence_text: str | None = None
+    evidence_item_count: int = 0
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    estimated_cost_usd: float | None = None
+    reported_cost_usd: float | None = None
+    latency_ms: int | None = None
+    stop_reason: str | None = None
+
 
 def cache_key(purpose: str, detail_level: str) -> str:
     norm = " ".join(purpose.split()).casefold()
@@ -269,22 +282,38 @@ async def generate_summary(
     except LLMBudgetExceeded as exc:
         return _fallback("budget_exceeded", str(exc))
 
+    evidence_text = _render_evidence(payload)
+    item_count = (
+        len(payload.get("facts", []))
+        + len(payload.get("relationships", []))
+        + len(payload.get("interactions", []))
+    )
     prompt = (
         f"PURPOSE: {purpose}\n"
         f"DETAIL LEVEL: {detail_level}\n\n"
-        f"EVIDENCE (selected from {domain.name}'s record):\n{_render_evidence(payload)}"
+        f"EVIDENCE (the whole curated record for {domain.name}):\n{evidence_text}"
     )
+
+    def _with_debug(r: SummaryResult) -> SummaryResult:
+        r.system_prompt = _SYSTEM
+        r.user_prompt = prompt
+        r.evidence_text = evidence_text
+        r.evidence_item_count = item_count
+        return r
+
+    started = dt.datetime.now(dt.UTC)
     try:
         result = await provider.generate(system=_SYSTEM, prompt=prompt, max_output_tokens=1200)
     except LLMNotConfigured as exc:
-        return _fallback("llm_unavailable", str(exc))
+        return _with_debug(_fallback("llm_unavailable", str(exc)))
     except LLMError as exc:
         llm_usage.record(session, scope.workspace_id, purpose="summarization", error=exc, run_ref=public_id)
-        return _fallback(
-            "llm_error", f"The model call failed ({exc.category}). Showing deterministic evidence."
+        return _with_debug(
+            _fallback("llm_error", f"The model call failed ({exc.category}). Showing deterministic evidence.")
         )
+    latency_ms = int((dt.datetime.now(dt.UTC) - started).total_seconds() * 1000)
 
-    llm_usage.record(
+    usage_event = llm_usage.record(
         session,
         scope.workspace_id,
         purpose="summarization",
@@ -298,7 +327,7 @@ async def generate_summary(
         model=result.model,
         provider_type=result.provider_type,
     )
-    return SummaryResult(
+    out = SummaryResult(
         public_id,
         domain.name,
         purpose,
@@ -312,7 +341,16 @@ async def generate_summary(
         cached=False,
         stale=False,
         created_at=dt.datetime.now(dt.UTC),
+        input_tokens=result.input_tokens,
+        output_tokens=result.output_tokens,
+        estimated_cost_usd=(
+            float(usage_event.estimated_cost_usd) if usage_event.estimated_cost_usd is not None else None
+        ),
+        reported_cost_usd=result.reported_cost_usd,
+        latency_ms=latency_ms,
+        stop_reason=result.stop_reason,
     )
+    return _with_debug(out)
 
 
 def invalidate_for_person(session: Session, workspace_id: uuid.UUID, person_id: uuid.UUID) -> int:
