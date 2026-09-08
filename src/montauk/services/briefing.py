@@ -51,7 +51,11 @@ from ..person_context import analyze_purpose, build_person_context
 from . import llm_usage, model_config
 from .summaries import cache_key, memory_fingerprint
 
-PROMPT_VERSION = "briefing.v1"
+# Bump whenever the retrieval selection, the prompt, or the evidence rendering
+# changes: a cached briefing built by an older version is not served (it would
+# reflect the old logic even though the person's record has not changed).
+#   v1 -> v2: broad/advisory purposes now retrieve the whole record.
+PROMPT_VERSION = "briefing.v2"
 MODES = ("summary_only", "evidence_only", "summary_with_evidence")
 COVERAGE_LEVELS = ("brief", "standard", "comprehensive")
 
@@ -438,7 +442,13 @@ async def prepare_briefing(
     # non-generated row (from a run made before a model was configured, or a
     # transient provider failure) must NOT shadow a fresh attempt -- fall
     # through and regenerate, overwriting it on success.
-    if existing is not None and existing.generated and not force and existing.invalidated_at is None:
+    if (
+        existing is not None
+        and existing.generated
+        and existing.schema_version == PROMPT_VERSION
+        and not force
+        and existing.invalidated_at is None
+    ):
         stale = existing.memory_fingerprint != fingerprint
         cached_refs = (existing.evidence_refs or {}).get("refs", refs)
         out = _result(

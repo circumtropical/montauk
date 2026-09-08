@@ -384,6 +384,37 @@ class TestProgressiveDisclosure:
         assert after.cached and after.stale
         assert "changed" in (after.agent_payload().get("note") or "")
 
+    async def test_cached_briefing_from_an_older_logic_version_is_not_served(
+        self, db_session, scope, workspace, secret_box, monkeypatch
+    ):
+        _make_person(scope)
+        _configure_model(db_session, workspace, secret_box)
+        fake = _fake(monkeypatch)
+
+        await briefing.prepare_briefing(
+            db_session,
+            scope,
+            public_id="P0001",
+            purpose="brief me before I see Dana",
+            secret_box=secret_box,
+        )
+        assert len(fake.calls) == 1
+
+        # Simulate a row written by an earlier briefing implementation.
+        entry = db_session.query(orm.SummaryCacheEntry).one()
+        entry.schema_version = "briefing.v1"
+        db_session.flush()
+
+        after = await briefing.prepare_briefing(
+            db_session,
+            scope,
+            public_id="P0001",
+            purpose="brief me before I see Dana",
+            secret_box=secret_box,
+        )
+        assert not after.cached and len(fake.calls) == 2  # regenerated, not served
+        assert db_session.query(orm.SummaryCacheEntry).one().schema_version == briefing.PROMPT_VERSION
+
     async def test_default_response_is_materially_smaller_than_the_evidence(
         self, db_session, scope, workspace, secret_box, monkeypatch
     ):
