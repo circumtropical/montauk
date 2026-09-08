@@ -27,6 +27,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    Numeric,
     String,
     Text,
     UniqueConstraint,
@@ -404,6 +405,13 @@ class WorkspaceSettings(Base, TimestampMixin):
     historical_ingestion_default: Mapped[str] = mapped_column(String(24), default="all_history")
     agent_transcript_access: Mapped[bool] = mapped_column(default=False)
 
+    # LLM cost controls (spec 16.3). NULL = no limit.
+    monthly_spend_limit_usd: Mapped[float | None] = mapped_column(Numeric(10, 2))
+    monthly_token_limit: Mapped[int | None] = mapped_column(Integer)
+    max_job_input_tokens: Mapped[int] = mapped_column(Integer, default=60_000)
+    # Owner pause switch, independent of the limit hard-stop (spec 16.3).
+    llm_processing_paused: Mapped[bool] = mapped_column(default=False)
+
     workspace: Mapped[Workspace] = relationship(back_populates="settings")
 
 
@@ -439,6 +447,93 @@ class AuditEvent(Base):
     latency_ms: Mapped[int | None] = mapped_column(Integer)
     detail: Mapped[Any | None] = mapped_column(JSONB)
     occurred_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class ModelConfiguration(Base, TimestampMixin):
+    """Per-workspace, per-purpose LLM configuration (spec 8.4, 16.1). Two
+    purposes -- ``summarization`` and ``extraction`` -- can point at
+    different providers/models. A row exists only after an explicit owner
+    action; its absence (or ``provider_type='none'``) means no LLM."""
+
+    __tablename__ = "model_configurations"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "purpose"),
+        CheckConstraint("purpose IN ('summarization', 'extraction')", name="purpose_valid"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(16))
+    provider_type: Mapped[str] = mapped_column(String(24), default="none")
+    model: Mapped[str] = mapped_column(String(120), default="")
+    base_url: Mapped[str | None] = mapped_column(String(500))
+    cli_binary: Mapped[str | None] = mapped_column(String(120))
+    # API key: AES-GCM ciphertext via SecretBox; never stored in plaintext.
+    api_key_ciphertext: Mapped[str | None] = mapped_column(Text)
+    # Optional owner-supplied pricing metadata for cost estimates (spec 16.3).
+    price_input_per_mtok: Mapped[float | None] = mapped_column(Numeric(10, 4))
+    price_output_per_mtok: Mapped[float | None] = mapped_column(Numeric(10, 4))
+    extra_config: Mapped[Any | None] = mapped_column(JSONB)
+    enabled: Mapped[bool] = mapped_column(default=True)
+
+
+class LLMUsageEvent(Base):
+    """One provider call's accounting (spec 16.3, 18): counts, cost, model,
+    outcome. Never message/fact content."""
+
+    __tablename__ = "llm_usage_events"
+    __table_args__ = (Index("ix_llm_usage_ws_time", "workspace_id", "occurred_at"),)
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    purpose: Mapped[str] = mapped_column(String(16))
+    provider_type: Mapped[str] = mapped_column(String(24))
+    model: Mapped[str] = mapped_column(String(120))
+    input_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    output_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    estimated_cost_usd: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    reported_cost_usd: Mapped[float | None] = mapped_column(Numeric(12, 6))
+    ok: Mapped[bool] = mapped_column(default=True)
+    error_category: Mapped[str | None] = mapped_column(String(32))
+    run_ref: Mapped[str | None] = mapped_column(String(200))
+    occurred_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+class SummaryCacheEntry(Base):
+    """A generated purpose-specific summary (spec 24.2): a cache entry, not
+    an authoritative fact. Invalidated when the person's memory changes."""
+
+    __tablename__ = "summary_cache"
+    __table_args__ = (
+        Index("ix_summary_cache_person", "workspace_id", "person_id"),
+        UniqueConstraint("workspace_id", "person_id", "cache_key"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    person_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("people.id", ondelete="CASCADE"), index=True)
+    # sha256 over (normalized purpose, detail_level) -- one cached summary per
+    # purpose per person.
+    cache_key: Mapped[str] = mapped_column(String(64))
+    purpose: Mapped[str] = mapped_column(Text)
+    detail_level: Mapped[str] = mapped_column(String(16))
+    generated: Mapped[bool] = mapped_column(default=False)
+    body: Mapped[str] = mapped_column(Text)
+    model: Mapped[str | None] = mapped_column(String(120))
+    provider_type: Mapped[str | None] = mapped_column(String(24))
+    schema_version: Mapped[str] = mapped_column(String(16), default="v1")
+    evidence_refs: Mapped[Any | None] = mapped_column(JSONB)
+    # Hash of the curated memory the summary was built from; a mismatch on
+    # read means the person's record changed -> stale.
+    memory_fingerprint: Mapped[str] = mapped_column(String(64))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    invalidated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class LegacyMigrationRun(Base):

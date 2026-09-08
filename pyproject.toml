@@ -65,7 +65,10 @@ ignore = ["UP042"]
 "src/montauk/db/alembic/env.py" = ["E402"]
 
 [tool.mypy]
-python_version = "3.11"
+# 3.12 so mypy can parse third-party stubs that use PEP 695 syntax (numpy).
+# Runtime support is still >=3.11 -- ruff (target py311) and the CI 3.11 job
+# guard against actually using 3.12-only syntax in our code.
+python_version = "3.12"
 # Phase 2 modules are typed from the start; extending strict typing to the
 # Phase 1 modules is tracked separately (ADR 0001).
 files = [
@@ -85,4 +88,9 @@ check_untyped_defs = true
 
 [[tool.mypy.overrides]]
 module = ["testcontainers.*", "argon2.*"]
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*"]
+follow_imports = "skip"
 ignore_missing_imports = true

@@ -131,6 +131,15 @@ def other_scope(db_session: Session, other_workspace):
 
 
 @pytest.fixture
+def secret_box():
+    import secrets as _secrets
+
+    from montauk.db.crypto import SecretBox
+
+    return SecretBox(key=_secrets.token_bytes(32))
+
+
+@pytest.fixture
 def web_app(session_maker, engine, _truncate):
     from montauk.services.auth import LoginThrottle
     from montauk.web.app import create_app
