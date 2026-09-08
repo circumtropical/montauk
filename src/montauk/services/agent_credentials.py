@@ -99,3 +99,25 @@ def rotate_credential(session: Session, *, workspace_id: uuid.UUID, credential_i
     cred.token_prefix = token_prefix(raw)
     cred.updated_at = dt.datetime.now(dt.UTC)
     return raw
+
+
+def authenticate(session: Session, raw_token: str) -> orm.AgentCredential | None:
+    """Resolve a bearer token to its (non-revoked) credential and stamp
+    last_used_at. Returns None for an unknown, malformed, or revoked token.
+    """
+    token = (raw_token or "").strip()
+    if not token:
+        return None
+    cred = session.execute(
+        select(orm.AgentCredential)
+        .where(orm.AgentCredential.token_hash == hash_token(token))
+        .where(orm.AgentCredential.revoked_at.is_(None))
+    ).scalar_one_or_none()
+    if cred is None:
+        return None
+    cred.last_used_at = utcnow()
+    return cred
+
+
+def has_capability(cred: orm.AgentCredential, capability: str) -> bool:
+    return capability in (cred.capabilities or [])

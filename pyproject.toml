@@ -77,6 +77,7 @@ files = [
     "src/montauk/exporters",
     "src/montauk/web",
     "src/montauk/llm",
+    "src/montauk/mcp2",
     "src/montauk/phase2_migration.py",
     "src/montauk/cli_phase2.py",
 ]

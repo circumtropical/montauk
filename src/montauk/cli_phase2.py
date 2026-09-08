@@ -202,7 +202,69 @@ def dashboard(
     )
 
 
+def mcp(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8766, "--port"),
+    database_url: str | None = DbUrlOption,
+    public_url: str | None = typer.Option(
+        None,
+        "--public-url",
+        help="Public URL agents connect to (e.g. https://montauk.example.com); restricts the "
+        "accepted Host header. Falls back to MONTAUK_PUBLIC_URL.",
+    ),
+) -> None:
+    """Run the Phase 2 MCP server: the agent-facing tool surface backed by
+    the PostgreSQL store. Binds to localhost by default; put a
+    TLS-terminating reverse proxy in front for anything beyond loopback.
+    Every request is bearer-authenticated against the workspace's agent
+    credentials (Settings -> agent tokens in the dashboard)."""
+    import os
+
+    import uvicorn
+
+    from .db.crypto import MasterKeyMissing, SecretBox
+    from .db.engine import create_db_engine
+    from .db.schema_ops import is_up_to_date
+    from .http_app import build_transport_security
+    from .mcp2 import Mcp2Context, build_mcp2_app
+
+    url = _require_url(database_url)
+    if not is_up_to_date(url):
+        typer.echo("error: schema is not up to date; run `montauk db upgrade` first", err=True)
+        raise typer.Exit(code=1)
+
+    resolved_public_url = public_url or os.environ.get("MONTAUK_PUBLIC_URL")
+    try:
+        secret_box: SecretBox | None = SecretBox()
+    except MasterKeyMissing:
+        secret_box = None
+        typer.echo(
+            "warning: MONTAUK_MASTER_KEY is not set -- briefings will fall back to deterministic "
+            "evidence (generated: false).",
+            err=True,
+        )
+
+    engine = create_db_engine(url)
+    ctx = Mcp2Context(session_factory=session_factory(engine), secret_box=secret_box)
+    app = build_mcp2_app(
+        ctx,
+        host=host,
+        transport_security=build_transport_security(
+            mode="remote", host=host, port=port, public_url=resolved_public_url
+        ),
+    )
+    loopback = host in ("127.0.0.1", "::1", "localhost")
+    if not loopback and not resolved_public_url:
+        typer.echo(
+            "warning: binding beyond loopback without --public-url -- put HTTPS in front; "
+            "Montauk speaks plain HTTP and bearer tokens would travel in the clear.",
+            err=True,
+        )
+    uvicorn.run(app, host=host, port=port)
+
+
 def register(app: typer.Typer) -> None:
     app.add_typer(db_app, name="db")
     app.add_typer(migrate_app, name="migrate")
     app.command("dashboard")(dashboard)
+    app.command("mcp")(mcp)
