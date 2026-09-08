@@ -78,9 +78,82 @@
   </div>
 
   <div class="card">
-    <h2>Connectors &amp; model provider</h2>
-    <p class="muted">Not available in this build. Inbound connectors (WhatsApp, Google Messages,
-      Gmail, IMAP) and the LLM extraction/summarization provider are configured here in a later increment.</p>
+    <h2>Model &amp; provider</h2>
+    {% if not has_master_key %}
+      <div class="notice">Set <code>MONTAUK_MASTER_KEY</code> in the environment to store an API key here.
+        The local <code>claude</code> / <code>codex</code> CLI providers work without one.</div>
+    {% endif %}
+    <p class="muted">
+      Point <strong>summarization</strong> (used now, on demand) and <strong>extraction</strong>
+      (used once connectors land) at a model each &mdash; the same one, or different ones.
+      Nothing is sent to a model until you configure one here.
+    </p>
+
+    {% for purpose, mv in model_views.items() %}
+    <details class="add" {{ 'open' if mv.provider_type != 'none' }}>
+      <summary>{{ purpose|title }} model &mdash;
+        <span class="muted">{{ provider_labels.get(mv.provider_type, mv.provider_type) }}{% if mv.model %} · {{ mv.model }}{% endif %}</span>
+      </summary>
+      <form method="post" action="/settings/model/{{ purpose }}" class="edit-grid">
+        <input type="hidden" name="_csrf" value="{{ csrf }}">
+        <div><label>Provider
+          <select name="provider_type" data-model-provider>
+            {% for pt in provider_types %}
+            <option value="{{ pt }}" {{ 'selected' if mv.provider_type == pt }}>{{ provider_labels.get(pt, pt) }}</option>
+            {% endfor %}
+          </select></label></div>
+        <div><label>Model
+          <input type="text" name="model" value="{{ mv.model }}" list="models-{{ purpose }}"
+            placeholder="e.g. claude-haiku-4-5">
+          <datalist id="models-{{ purpose }}">
+            {% for pt, models in model_suggestions.items() %}{% for m in models %}<option value="{{ m }}">{% endfor %}{% endfor %}
+          </datalist></label></div>
+        <div><label>Base URL (OpenAI-compatible only)
+          <input type="text" name="base_url" value="{{ mv.base_url }}" placeholder="http://localhost:11434/v1"></label></div>
+        <div><label>CLI binary (claude / codex CLI only, optional)
+          <input type="text" name="cli_binary" value="{{ mv.cli_binary }}" placeholder="claude"></label></div>
+        <div><label>API key {% if mv.has_api_key %}<span class="muted">(stored &mdash; leave blank to keep)</span>{% endif %}
+          <input type="password" name="api_key" autocomplete="off" data-reveal
+            placeholder="{{ 'unchanged' if mv.has_api_key else 'sk-...' }}"></label></div>
+        <div><label style="display:flex;gap:0.4rem;align-items:center">
+          <input type="checkbox" name="clear_api_key" value="1" style="width:auto"> Remove stored key</label></div>
+        <div><label>Price $/1M input (optional, for estimates)
+          <input type="text" name="price_input" value="{{ mv.price_input_per_mtok }}" placeholder="1.00"></label></div>
+        <div><label>Price $/1M output (optional)
+          <input type="text" name="price_output" value="{{ mv.price_output_per_mtok }}" placeholder="5.00"></label></div>
+        <div><label style="display:flex;gap:0.4rem;align-items:center">
+          <input type="checkbox" name="disabled" value="1" style="width:auto" {{ 'checked' if not mv.enabled }}> Disabled</label></div>
+        <div class="wide">
+          <button type="submit">Save {{ purpose }} model</button>
+          <button type="submit" formaction="/settings/model/{{ purpose }}/test" class="secondary">Test connection</button>
+        </div>
+      </form>
+    </details>
+    {% endfor %}
+  </div>
+
+  <div class="card">
+    <h2>LLM cost controls</h2>
+    <p>This month ({{ llm_usage.month }}): <strong>{{ llm_usage.ok_calls }}</strong> calls,
+      {{ '{:,}'.format(llm_usage.input_tokens + llm_usage.output_tokens) }} tokens,
+      {% if llm_usage.best_cost_usd %}~${{ '%.4f'|format(llm_usage.best_cost_usd) }}{% else %}<span class="muted">cost estimate unavailable</span>{% endif %}.
+      {% if budget and budget.blocked %}<span class="error"> &mdash; {{ budget.reason }}, so processing is stopped (ingestion is not).</span>{% endif %}
+    </p>
+    <form method="post" action="/settings/cost-controls" class="edit-grid">
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+      <div><label>Monthly spend limit (USD, blank = none)
+        <input type="text" name="monthly_spend_limit_usd" value="{{ ws_settings.monthly_spend_limit_usd or '' }}" placeholder="5.00"></label></div>
+      <div><label>Monthly token limit (blank = none)
+        <input type="text" name="monthly_token_limit" value="{{ ws_settings.monthly_token_limit or '' }}" placeholder="2000000"></label></div>
+      <div><label>Max input tokens per job/batch
+        <input type="text" name="max_job_input_tokens" value="{{ ws_settings.max_job_input_tokens }}"></label></div>
+      <div><label style="display:flex;gap:0.4rem;align-items:center">
+        <input type="checkbox" name="llm_processing_paused" value="1" style="width:auto" {{ 'checked' if ws_settings.llm_processing_paused }}>
+        Pause all LLM processing</label></div>
+      <div class="wide"><button type="submit">Save cost controls</button></div>
+    </form>
+    <p class="muted">Reaching a limit hard-stops model calls; message ingestion continues. Costs are
+      estimates unless the provider reports its own (the <code>claude</code> CLI does).</p>
   </div>
 
   <div class="card">

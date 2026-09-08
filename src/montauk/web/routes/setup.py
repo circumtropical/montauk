@@ -38,6 +38,10 @@ def setup_submit(
     workspace_name: str = Form(...),
     public_url: str = Form(""),
     deployment_profile: str = Form("private"),
+    llm_provider_type: str = Form("none"),
+    llm_model: str = Form(""),
+    llm_api_key: str = Form(""),
+    llm_base_url: str = Form(""),
 ) -> HTMLResponse:
     def fail(msg: str) -> HTMLResponse:
         return TEMPLATES.TemplateResponse(
@@ -84,6 +88,24 @@ def setup_submit(
         return RedirectResponse("/", status_code=303)  # type: ignore[return-value]
 
     session.flush()
+
+    if llm_provider_type and llm_provider_type != "none":
+        from ...services import model_config
+
+        try:
+            model_config.save(
+                session,
+                workspace.id,
+                "summarization",
+                provider_type=llm_provider_type,
+                model=llm_model,
+                base_url=llm_base_url,
+                api_key=llm_api_key,
+                secret_box=get_state(request).secret_box,
+            )
+        except model_config.ModelConfigError:
+            pass  # a bad optional config at setup time shouldn't block owner creation
+
     raw = create_session(session, user=user, workspace_id=workspace.id)
     resp = RedirectResponse("/", status_code=303)
     resp.set_cookie(

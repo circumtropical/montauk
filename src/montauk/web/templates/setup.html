@@ -41,6 +41,26 @@
       <input type="text" id="public_url" name="public_url" value="{{ v.public_url or '' }}" placeholder="https://montauk.example.com">
     </div>
 
+    <h2>4. LLM model (optional)</h2>
+    <p class="muted">Powers on-demand summaries now, and extraction once connectors land. Skip and
+      configure it later in Settings.</p>
+    <div>
+      <label for="llm_provider_type">Provider</label>
+      <select id="llm_provider_type" name="llm_provider_type">
+        <option value="none" selected>Skip for now</option>
+        <option value="claude_cli">Local claude CLI (Claude subscription auth)</option>
+        <option value="codex_cli">Local codex CLI (Codex subscription auth)</option>
+        <option value="anthropic_api">Anthropic API (API key)</option>
+        <option value="openai_compatible">OpenAI-compatible endpoint</option>
+      </select>
+    </div>
+    <div><label for="llm_model">Model</label>
+      <input type="text" id="llm_model" name="llm_model" placeholder="claude-haiku-4-5"></div>
+    <div><label for="llm_base_url">Base URL (OpenAI-compatible only)</label>
+      <input type="text" id="llm_base_url" name="llm_base_url" placeholder="http://localhost:11434/v1"></div>
+    <div><label for="llm_api_key">API key (Anthropic / OpenAI-compatible only)</label>
+      <input type="password" id="llm_api_key" name="llm_api_key" autocomplete="off" data-reveal></div>
+
     <button type="submit">Create owner &amp; workspace</button>
   </form>
 {% endblock %}

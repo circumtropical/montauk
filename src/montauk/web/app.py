@@ -18,6 +18,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session, sessionmaker
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from ..db.crypto import SecretBox
 from ..db.engine import create_db_engine, session_factory
 from ..services.auth import SESSION_COOKIE, LoginThrottle, resolve_session
 from ..services.workspace import is_initialized
@@ -42,6 +43,23 @@ class AppState:
         self.session_factory = factory
         self.throttle = throttle
         self.secure_cookies = secure_cookies
+        self._secret_box: SecretBox | None = None
+        self._secret_box_loaded = False
+
+    @property
+    def secret_box(self) -> SecretBox | None:
+        """The AES-GCM SecretBox, or None when MONTAUK_MASTER_KEY is unset.
+        Loaded lazily so the dashboard still boots without a master key --
+        provider API-key storage is simply unavailable until one is set."""
+        if not self._secret_box_loaded:
+            from ..db.crypto import MasterKeyMissing
+
+            try:
+                self._secret_box = SecretBox()
+            except MasterKeyMissing:
+                self._secret_box = None
+            self._secret_box_loaded = True
+        return self._secret_box
 
 
 def get_state(request: Request) -> AppState:

@@ -10,6 +10,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ...db import models as orm
+from ...llm.base import PROVIDER_TYPES, PURPOSES, LLMError
+from ...llm.factory import build_provider
+from ...services import llm_usage, model_config
 from ...services.agent_credentials import (
     CAPABILITIES,
     DEFAULT_CAPABILITIES,
@@ -28,7 +31,7 @@ from ...services.settings import (
     update_review_policy,
     update_workspace,
 )
-from ..app import TEMPLATES, db_session
+from ..app import TEMPLATES, db_session, get_state
 from ..deps import csrf_protect, page_context, require_auth
 
 router = APIRouter(prefix="/settings")
@@ -44,6 +47,10 @@ def _settings_context(request: Request, auth: AuthContext, session: Session, **e
             .order_by(orm.LegacyMigrationRun.started_at.desc())
         ).scalars()
     )
+    has_master_key = get_state(request).secret_box is not None
+    model_views = {p: model_config.view(session, auth.workspace_id, p) for p in PURPOSES}
+    usage = llm_usage.month_to_date(session, auth.workspace_id)
+    budget = llm_usage.budget_state(session, auth.workspace_id, ws_settings) if ws_settings else None
     return page_context(
         request,
         auth,
@@ -57,6 +64,13 @@ def _settings_context(request: Request, auth: AuthContext, session: Session, **e
         deployment_profiles=DEPLOYMENT_PROFILES,
         historical_ingestion_options=HISTORICAL_INGESTION,
         migrations=migrations,
+        model_views=model_views,
+        provider_types=PROVIDER_TYPES,
+        provider_labels=model_config.PROVIDER_LABELS,
+        model_suggestions=model_config.MODEL_SUGGESTIONS,
+        has_master_key=has_master_key,
+        llm_usage=usage,
+        budget=budget,
         **extra,
     )
 
@@ -127,6 +141,109 @@ async def save_review_policy(
     except SettingsError as exc:
         return _page(request, auth, session, error=str(exc), status_code=400)
     return _page(request, auth, session, flash="Processing & review settings saved.")
+
+
+@router.post("/model/{purpose}", response_class=HTMLResponse, dependencies=[Depends(csrf_protect)])
+async def save_model(
+    request: Request,
+    purpose: str,
+    auth: AuthContext = Depends(require_auth),
+    session: Session = Depends(db_session),
+) -> HTMLResponse:
+    if purpose not in PURPOSES:
+        return _page(request, auth, session, error="unknown purpose", status_code=400)
+    f = await request.form()
+    try:
+        model_config.save(
+            session,
+            auth.workspace_id,
+            purpose,
+            provider_type=str(f.get("provider_type", "none")),
+            model=str(f.get("model", "")),
+            base_url=str(f.get("base_url", "")),
+            cli_binary=str(f.get("cli_binary", "")),
+            api_key=str(f.get("api_key", "")),
+            clear_api_key=f.get("clear_api_key") is not None,
+            price_input=str(f.get("price_input", "")),
+            price_output=str(f.get("price_output", "")),
+            enabled=f.get("disabled") is None,
+            secret_box=get_state(request).secret_box,
+        )
+    except model_config.ModelConfigError as exc:
+        return _page(request, auth, session, error=str(exc), status_code=400)
+    return _page(request, auth, session, flash=f"{purpose.title()} model configuration saved.")
+
+
+@router.post("/model/{purpose}/test", response_class=HTMLResponse, dependencies=[Depends(csrf_protect)])
+async def test_model(
+    request: Request,
+    purpose: str,
+    auth: AuthContext = Depends(require_auth),
+    session: Session = Depends(db_session),
+) -> HTMLResponse:
+    if purpose not in PURPOSES:
+        return _page(request, auth, session, error="unknown purpose", status_code=400)
+    try:
+        resolved = model_config.resolve(
+            session, auth.workspace_id, purpose, secret_box=get_state(request).secret_box
+        )
+    except model_config.ModelConfigError as exc:
+        return _page(request, auth, session, error=str(exc), status_code=400)
+    provider = build_provider(resolved)
+    if provider is None:
+        return _page(request, auth, session, error=f"no {purpose} model is configured")
+    try:
+        result = await provider.healthcheck()
+    except LLMError as exc:
+        return _page(
+            request,
+            auth,
+            session,
+            error=f"{purpose} model test failed ({exc.category}): {exc}",
+            status_code=400,
+        )
+    return _page(
+        request,
+        auth,
+        session,
+        flash=f"{purpose.title()} model OK -- {result.model} replied ({result.output_tokens} tokens).",
+    )
+
+
+@router.post("/cost-controls", response_class=HTMLResponse, dependencies=[Depends(csrf_protect)])
+async def save_cost_controls(
+    request: Request,
+    auth: AuthContext = Depends(require_auth),
+    session: Session = Depends(db_session),
+) -> HTMLResponse:
+    f = await request.form()
+    settings = session.get(orm.WorkspaceSettings, auth.workspace_id)
+    if settings is None:
+        return _page(request, auth, session, error="workspace settings missing", status_code=400)
+
+    def _num(name: str, is_int: bool) -> float | None:
+        raw = str(f.get(name, "")).strip()
+        if not raw:
+            return None
+        try:
+            v = float(int(raw)) if is_int else float(raw)
+        except ValueError as exc:
+            raise SettingsError(f"{name.replace('_', ' ')} must be a number") from exc
+        if v < 0:
+            raise SettingsError(f"{name.replace('_', ' ')} cannot be negative")
+        return v
+
+    try:
+        settings.monthly_spend_limit_usd = _num("monthly_spend_limit_usd", is_int=False)
+        tok = _num("monthly_token_limit", is_int=True)
+        settings.monthly_token_limit = int(tok) if tok is not None else None
+        mji = _num("max_job_input_tokens", is_int=True)
+        settings.max_job_input_tokens = int(mji) if mji else 60_000
+    except SettingsError as exc:
+        return _page(request, auth, session, error=str(exc), status_code=400)
+    settings.llm_processing_paused = f.get("llm_processing_paused") is not None
+    session.flush()
+    return _page(request, auth, session, flash="Cost controls saved.")
 
 
 @router.post("/password", response_class=HTMLResponse, dependencies=[Depends(csrf_protect)])

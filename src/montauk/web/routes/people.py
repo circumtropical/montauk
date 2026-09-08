@@ -7,6 +7,7 @@ from collections.abc import Callable
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
+from sqlalchemy import select
 
 from ...dates import Birthday
 from ...db import models as orm
@@ -22,8 +23,10 @@ from ...db.repositories import (
 from ...errors import MontaukValidationError
 from ...models import ContactInfo, Person, Source
 from ...schema import CATEGORIES, Confidence
+from ...services import summaries
 from ...services.auth import AuthContext
-from ..app import TEMPLATES
+from ...services.summaries import DETAIL_LEVELS as SUMMARY_DETAIL_LEVELS
+from ..app import TEMPLATES, get_state
 from ..deps import csrf_protect, page_context, require_auth, workspace_scope
 
 router = APIRouter(prefix="/people")
@@ -178,6 +181,7 @@ def _render_person(
     error: str | None = None,
     form: dict | None = None,
     status_code: int = 200,
+    summary_result: object | None = None,
 ) -> HTMLResponse:
     domain = person_to_domain(row)
     facts_by_category = {
@@ -192,6 +196,16 @@ def _render_person(
 
     interactions = sorted(domain.interactions, key=lambda i: i.date.latest(), reverse=True)
     revisions = RevisionRepository(scope).for_person(row.id, limit=100)
+
+    cached_summaries = list(
+        scope.session.execute(
+            select(orm.SummaryCacheEntry)
+            .where(orm.SummaryCacheEntry.workspace_id == scope.workspace_id)
+            .where(orm.SummaryCacheEntry.person_id == row.id)
+            .where(orm.SummaryCacheEntry.invalidated_at.is_(None))
+            .order_by(orm.SummaryCacheEntry.created_at.desc())
+        ).scalars()
+    )
 
     return TEMPLATES.TemplateResponse(
         request,
@@ -213,6 +227,9 @@ def _render_person(
             edit_error=error,
             form=form or _person_form_values(domain),
             flash=_dupes_flash(request),
+            summary_result=summary_result,
+            cached_summaries=cached_summaries,
+            summary_detail_levels=SUMMARY_DETAIL_LEVELS,
         ),
         status_code=status_code,
     )
@@ -560,3 +577,45 @@ def _int_or_none(raw: str) -> int | None:
     if not raw:
         return None
     return int(raw)  # ValueError -> handled by _run_op
+
+
+# --- purpose-specific summary (spec 24.2) ---------------------------
+
+
+@router.post("/{public_id}/summary", response_class=HTMLResponse, dependencies=[Depends(csrf_protect)])
+async def generate_person_summary(
+    request: Request,
+    public_id: str,
+    auth: AuthContext = Depends(require_auth),
+    scope: WorkspaceScope = Depends(workspace_scope),
+) -> Response:
+    repo, row = _load(scope, public_id)
+    f = await request.form()
+    purpose = str(f.get("purpose", "")).strip()
+    detail_level = str(f.get("detail_level", "standard"))
+    force = f.get("force") is not None
+    if not purpose:
+        return _render_person(
+            request,
+            auth,
+            scope,
+            repo,
+            row,
+            error="Enter a purpose for the summary (the question or task it should serve).",
+            status_code=400,
+        )
+    if detail_level not in SUMMARY_DETAIL_LEVELS:
+        detail_level = "standard"
+    try:
+        result = await summaries.generate_summary(
+            scope.session,
+            scope,
+            public_id=public_id,
+            purpose=purpose,
+            detail_level=detail_level,
+            secret_box=get_state(request).secret_box,
+            force=force,
+        )
+    except ValueError as exc:
+        return _render_person(request, auth, scope, repo, row, error=str(exc), status_code=400)
+    return _render_person(request, auth, scope, repo, row, summary_result=result)

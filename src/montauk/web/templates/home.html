@@ -8,6 +8,12 @@
       <div class="muted">{{ archived_count }} archived</div></div>
     <div class="card stat"><div class="n">{{ birthdays|length }}</div><div class="l">birthdays in 30 days</div></div>
     <div class="card stat"><div class="n">{{ overdue|length }}</div><div class="l">overdue contacts</div></div>
+    <div class="card stat {{ 'degraded' if llm_status != 'ready' }}">
+      <div class="n">{{ 'OK' if llm_status == 'ready' else '&mdash;'|safe }}</div>
+      <div class="l">LLM</div>
+      <div class="muted">{{ llm_status }}{% if llm_usage.ok_calls %} &middot; {{ llm_usage.ok_calls }} calls this month{% if llm_usage.best_cost_usd %} (~${{ '%.2f'|format(llm_usage.best_cost_usd) }}){% endif %}{% endif %}</div>
+      <div class="muted"><a href="/settings">configure</a></div>
+    </div>
     {% for label, why in deferred.items() %}
     <div class="card stat degraded"><div class="n">&mdash;</div>
       <div class="l">{{ label.replace('_', ' ') }}</div>
