@@ -47,7 +47,7 @@ from ..db.repositories import PeopleRepository, WorkspaceScope
 from ..llm.base import LLMBudgetExceeded, LLMError, LLMNotConfigured
 from ..llm.factory import build_provider
 from ..models import Person as DomainPerson
-from ..person_context import build_person_context
+from ..person_context import analyze_purpose, build_person_context
 from . import llm_usage, model_config
 from .summaries import cache_key, memory_fingerprint
 
@@ -220,24 +220,40 @@ def _core_fields(p: DomainPerson) -> dict[str, Any]:
 def _select_evidence(
     domain: DomainPerson, purpose: str, coverage: str, rcfg: RetrievalConfig
 ) -> tuple[dict[str, Any], list[str]]:
-    """Rank + trim the curated record for `purpose` (spec 24.1). Falls back to
-    the whole record when a vague purpose yields no lexical hits."""
-    budget = rcfg.budget_for(coverage)
+    """Select the curated evidence for `purpose` (spec 24.1).
+
+    There is no semantic index for the Postgres store yet, so retrieval is
+    lexical (BM25) only. A broad ask -- a briefing, an advisory question
+    ("what should I discuss with X"), a present-state question, or anything
+    without a pointed lexical query -- gets the *whole* curated record: a
+    person's record is small, and narrowing it to the handful of lexical
+    hits starves the model (that is what produced one-line briefings). A
+    pointed lexical query ("what did she say about the reorg") keeps the
+    focused retrieval.
+    """
+    analysis = analyze_purpose(purpose, subject_name=domain.name)
+    broad = (
+        analysis.is_briefing
+        or analysis.is_advisory
+        or analysis.wants_present_state
+        or not analysis.has_lexical_query
+    )
+    retrieval_level = "comprehensive" if broad else coverage
     ctx = build_person_context(
         domain,
         purpose,
-        detail_level=coverage,
-        budget_tokens=budget,
+        detail_level=retrieval_level,
+        budget_tokens=rcfg.budget_for(retrieval_level),
         semantic_index=None,
         lexical_enabled=rcfg.lexical_enabled,
     )
     payload = ctx.to_payload()
-    if not payload["facts"] and not payload["interactions"] and coverage != "comprehensive":
+    if not payload["facts"] and not payload["interactions"] and retrieval_level != "comprehensive":
         ctx = build_person_context(
             domain,
             purpose,
             detail_level="comprehensive",
-            budget_tokens=budget,
+            budget_tokens=rcfg.budget_for("comprehensive"),
             semantic_index=None,
             lexical_enabled=rcfg.lexical_enabled,
         )

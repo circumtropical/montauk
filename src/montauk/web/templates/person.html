@@ -79,10 +79,12 @@
         {% if sr.evidence_text %}
         <details>
           <summary>Debug &mdash; exactly what was sent to the model</summary>
-          <p class="muted">Montauk ranked and trimmed this person's curated record for the purpose
+          <p class="muted">Montauk selected the curated evidence for the purpose
             ({{ sr.evidence_item_count }} source refs), then the model compressed it into the
-            briefing above. The claim-to-source mapping is retained for
-            <code>get_context_sources</code>.</p>
+            briefing above. Retrieval is lexical (BM25) only &mdash; there is no semantic index
+            for the dashboard store yet &mdash; so a broad or advisory purpose is given the whole
+            record and a pointed keyword query is narrowed to its matches. The claim-to-source
+            mapping is retained for <code>get_context_sources</code>.</p>
           <h3>System prompt</h3>
           <pre style="white-space:pre-wrap">{{ sr.system_prompt }}</pre>
           <h3>User prompt (purpose + evidence)</h3>

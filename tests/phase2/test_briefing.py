@@ -133,6 +133,29 @@ class TestProgressiveDisclosure:
             "note",
         }
 
+    async def test_broad_or_advisory_purpose_sees_the_whole_record(
+        self, db_session, scope, workspace, secret_box, monkeypatch
+    ):
+        _make_person(scope)
+        _configure_model(db_session, workspace, secret_box)
+        fake = _fake(monkeypatch, "Lots to discuss with Dana.")  # no SOURCE_REFS line
+
+        # "discuss" lexically hits only one record; an advisory purpose must
+        # still hand the model the whole small curated record, not just the
+        # keyword matches (there is no semantic index for this store).
+        result = await briefing.prepare_briefing(
+            db_session,
+            scope,
+            public_id="P0001",
+            purpose="What should I discuss with Dana?",
+            secret_box=secret_box,
+        )
+        assert result.generated is True
+        _sys, sent_prompt = fake.calls[0]
+        for needle in ("staff engineer", "trail-running", "Robin", "Alberta Arts", "knee injury"):
+            assert needle in sent_prompt
+        assert len(result.source_refs) >= 6  # all facts + interactions, not one lexical hit
+
     async def test_source_refs_resolve_to_the_supporting_records(
         self, db_session, scope, workspace, secret_box, monkeypatch
     ):
