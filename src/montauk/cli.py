@@ -34,6 +34,11 @@ app = typer.Typer(add_completion=False, no_args_is_help=True, help="Montauk rela
 agents_app = typer.Typer(add_completion=False, no_args_is_help=True, help="Manage agent credentials.")
 app.add_typer(agents_app, name="agents")
 
+# Phase 2: `montauk db ...` (PostgreSQL schema) and `montauk migrate phase2 ...`.
+from .cli_phase2 import register as _register_phase2  # noqa: E402
+
+_register_phase2(app)
+
 ConfigOption = typer.Option(None, "--config", help="Path to a YAML config file.")
 DataDirOption = typer.Option(None, "--data-dir", help="Deployment data directory (overrides the config's data_dir).")
 

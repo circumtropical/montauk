@@ -72,6 +72,8 @@ files = [
     "src/montauk/services",
     "src/montauk/exporters",
     "src/montauk/web",
+    "src/montauk/phase2_migration.py",
+    "src/montauk/cli_phase2.py",
 ]
 plugins = []
 warn_unused_ignores = true
