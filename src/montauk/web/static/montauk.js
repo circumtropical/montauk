@@ -27,4 +27,11 @@
       input.focus();
     });
   });
+
+  // Confirmation on destructive forms (CSP-safe alternative to inline onsubmit).
+  document.querySelectorAll("form[data-confirm]").forEach(function (form) {
+    form.addEventListener("submit", function (e) {
+      if (!window.confirm(form.getAttribute("data-confirm"))) e.preventDefault();
+    });
+  });
 })();

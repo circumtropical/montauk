@@ -33,6 +33,10 @@ def flexdate_columns(value: FlexDate | None) -> tuple[str | None, str | None]:
     return value.to_string(), value.precision.value
 
 
+def flexdate_columns_required(value: FlexDate) -> tuple[str, str]:
+    return value.to_string(), value.precision.value
+
+
 def flexdate_from_text(text: str | None) -> FlexDate | None:
     if not text:
         return None

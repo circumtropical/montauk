@@ -257,6 +257,120 @@ class TestWithMigratedData:
         r = self._edit(populated, "P0001", name="Dana Whitfield", cadence="soon")
         assert r.status_code == 400
 
+    def _post(self, client, path, **data):
+        data["_csrf"] = _csrf(client, "/people/P0002")
+        return client.post(path, data=data, follow_redirects=False)
+
+    def test_add_edit_remove_fact_inline(self, populated):
+        r = self._post(
+            populated, "/people/P0002/facts", category="Interests", text="Keeps bees", confidence="medium"
+        )
+        assert r.status_code == 303
+        page = populated.get("/people/P0002").text
+        assert "Keeps bees" in page and "fact-" in page
+
+        # the new fact id is the last allocated; edit it
+        import re
+
+        fid = re.findall(r"/people/P0002/facts/(fact-\d+)\b", page)[-1]
+        r = self._post(
+            populated,
+            f"/people/P0002/facts/{fid}",
+            text="Keeps bees and chickens",
+            category="Interests",
+            date="2022",
+            confidence="high",
+        )
+        assert r.status_code == 303
+        page = populated.get("/people/P0002").text
+        assert "Keeps bees and chickens" in page and "2022" in page
+
+        r = self._post(populated, f"/people/P0002/facts/{fid}/delete", _reason="mistake")
+        assert r.status_code == 303
+        after = populated.get("/people/P0002").text
+        assert f"/people/P0002/facts/{fid}\"" not in after  # no edit form for it any more
+        assert "removed" in after and "mistake" in after  # but the revision is recorded
+
+    def test_add_fact_with_related_person_becomes_a_relationship(self, populated):
+        r = self._post(
+            populated,
+            "/people/P0002/facts",
+            category="Family",
+            text="Sibling of Marco",
+            related_person_id="P0003",
+        )
+        assert r.status_code == 303
+        page = populated.get("/people/P0002").text
+        assert "Sibling of Marco" in page
+        assert "Marco Reyes (P0003)" in page  # shown under Relationships, resolved
+
+    def test_fact_rejects_unknown_related_person(self, populated):
+        r = self._post(
+            populated, "/people/P0002/facts", category="Family", text="x", related_person_id="P0404"
+        )
+        assert r.status_code == 400
+        assert "P0404" in r.text
+
+    def test_fact_rejects_unknown_category(self, populated):
+        r = self._post(populated, "/people/P0002/facts", category="Bogus", text="x")
+        assert r.status_code == 400
+
+    def test_add_edit_remove_interaction_inline(self, populated):
+        r = self._post(
+            populated,
+            "/people/P0002/interactions",
+            date="2024-07-01",
+            channel="text",
+            summary="Quick hello",
+        )
+        assert r.status_code == 303
+        page = populated.get("/people/P0002").text
+        assert "Quick hello" in page
+
+        import re
+
+        iid = re.findall(r"/people/P0002/interactions/(int-\d+)\b", page)[-1]
+        r = self._post(
+            populated,
+            f"/people/P0002/interactions/{iid}",
+            date="2024-07",
+            summary="Longer chat",
+            connection_level="4",
+        )
+        assert r.status_code == 303
+        assert "Longer chat" in populated.get("/people/P0002").text
+
+        r = self._post(populated, f"/people/P0002/interactions/{iid}/delete")
+        assert r.status_code == 303
+        after = populated.get("/people/P0002").text
+        assert f"/people/P0002/interactions/{iid}\"" not in after
+
+    def test_interaction_requires_a_date(self, populated):
+        r = self._post(populated, "/people/P0002/interactions", summary="no date given")
+        assert r.status_code == 400
+
+    def test_inline_edit_forms_present_on_person_page(self, populated):
+        page = populated.get("/people/P0003").text
+        assert "/people/P0003/facts" in page  # add-fact form
+        assert "/people/P0003/interactions/int-1" in page  # edit-interaction form
+        assert "Add an interaction" in page
+
+    def test_cannot_edit_a_fact_on_a_person_in_another_workspace(self, populated, session_maker):
+        with session_maker() as s:
+            other = get_or_create_workspace(s, "Elsewhere")
+            PeopleRepository(WorkspaceScope(s, other.id, Actor("owner"))).create(
+                Person(
+                    id="P0001",
+                    name="Theirs",
+                    facts=[Fact(id="fact-1", category="General Notes", text="secret")],
+                )
+            )
+            s.commit()
+        # P0001 in the owner's workspace exists (Dana), but fact-1 belongs to Dana,
+        # not the other workspace's person -- and there is no cross-workspace path anyway.
+        r = self._post(populated, "/people/P0001/facts/fact-9/delete")
+        assert r.status_code == 400  # LocalRecordNotFound, not a 500 or cross-tenant hit
+
     def test_transcripts_page_shows_degraded_state(self, populated):
         assert "No inbound connectors" in populated.get("/transcripts").text
 

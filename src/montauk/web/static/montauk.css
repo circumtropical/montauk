@@ -105,6 +105,20 @@ pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px
 .edit-grid textarea { resize: vertical; }
 @media (max-width: 560px) { .edit-grid { grid-template-columns: 1fr; } }
 
+.row-actions { display: flex; gap: 0.6rem; align-items: flex-start; margin-top: 0.3rem; }
+.row-actions details { flex: 1; }
+.fact details, .interaction details, details.add { margin: 0.3rem 0; }
+details > summary {
+  cursor: pointer; color: var(--accent); font-size: 0.85rem; list-style: none;
+  display: inline-block; padding: 0.15rem 0;
+}
+details > summary::-webkit-details-marker { display: none; }
+details[open] > summary { margin-bottom: 0.4rem; }
+details.add { border-top: 1px solid var(--border); padding-top: 0.6rem; margin-top: 0.8rem; }
+details.add > summary { font-weight: 600; font-size: 0.95rem; }
+.edit-grid label { display: block; }
+.edit-grid label select, .edit-grid label input, .edit-grid label textarea { margin-top: 0.15rem; }
+
 .pw-field { position: relative; }
 .pw-field input { padding-right: 2.6rem; }
 .pw-toggle {

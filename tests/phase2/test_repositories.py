@@ -7,7 +7,13 @@ import pytest
 from sqlalchemy.exc import IntegrityError
 
 from montauk.db import mapping
-from montauk.db.repositories import PeopleRepository, PersonNotFound, RevisionRepository
+from montauk.db.repositories import (
+    LocalRecordNotFound,
+    PeopleRepository,
+    PersonNotFound,
+    RelatedPersonInvalid,
+    RevisionRepository,
+)
 from montauk.models import ContactInfo, Fact, Interaction, Person
 
 
@@ -225,3 +231,99 @@ class TestRevisions:
         fact = repo.require("P0002").facts[0]
         assert fact.related_person_public_id == "P0001"
         assert fact.related_person_id is not None
+
+
+class TestInlineFactEditing:
+    def test_add_update_remove_fact_allocates_ids_and_logs_revisions(self, scope):
+        repo = PeopleRepository(scope)
+        row = _create(repo, _person("P0001", "Homer"))
+
+        fid = repo.add_fact(row, category="Interests", text="Enjoys donuts", confidence="medium")
+        repo.session.flush()
+        assert fid == "fact-1"
+        assert mapping.person_to_domain(repo.require("P0001")).facts[0].text == "Enjoys donuts"
+
+        repo.add_fact(row, category="Work & Education", text="Safety inspector")
+        repo.session.flush()
+        repo.remove_fact(row, "fact-1", reason="wrong")
+        repo.session.flush()
+        # next id keeps climbing -- freed ids are not reused
+        assert repo.add_fact(row, category="Family", text="Married to Marge") == "fact-3"
+
+        repo.update_fact(row, "fact-2", text="Nuclear safety inspector", confidence="high")
+        repo.session.flush()
+        back = {f.id: f for f in mapping.person_to_domain(repo.require("P0001")).facts}
+        assert back["fact-2"].text == "Nuclear safety inspector"
+
+        revs = {(r.entity_type, r.field) for r in RevisionRepository(scope).for_person(row.id)}
+        assert ("fact", "__created__") in revs
+        assert ("fact", "__removed__") in revs
+        assert ("fact", "text") in revs
+
+    def test_add_fact_partial_date_precision(self, scope):
+        repo = PeopleRepository(scope)
+        row = _create(repo, _person("P0001", "P"))
+        repo.add_fact(row, category="Life Events", text="Started a new job", date="2021")
+        repo.add_fact(row, category="Life Events", text="Moved house", date="2021-06")
+        repo.session.flush()
+        dates = [f.date.to_string() for f in mapping.person_to_domain(repo.require("P0001")).facts]
+        assert dates == ["2021", "2021-06"]
+
+    def test_related_person_reference_validated_against_workspace(self, scope, other_scope):
+        repo = PeopleRepository(scope)
+        other = PeopleRepository(other_scope)
+        row = _create(repo, _person("P0001", "Homer"))
+        _create(other, _person("P0001", "Someone Else"))  # same public id, other workspace
+
+        with pytest.raises(RelatedPersonInvalid):
+            repo.add_fact(row, category="Family", text="x", related_person_id="P0001")  # self
+        with pytest.raises(RelatedPersonInvalid):
+            repo.add_fact(row, category="Family", text="x", related_person_id="P0404")  # missing
+        with pytest.raises(RelatedPersonInvalid):
+            repo.add_fact(row, category="Family", text="x", related_person_id="not-an-id")
+
+        target = _create(repo, _person("P0002", "Bart"))
+        repo.add_fact(row, category="Family", text="Homer's son", related_person_id="P0002")
+        repo.session.flush()
+        fact = repo.require("P0001").facts[0]
+        assert fact.related_person_id == target.id
+
+    def test_remove_unknown_fact_raises(self, scope):
+        repo = PeopleRepository(scope)
+        row = _create(repo, _person("P0001", "P"))
+        with pytest.raises(LocalRecordNotFound):
+            repo.remove_fact(row, "fact-9")
+
+
+class TestInlineInteractionEditing:
+    def test_add_update_remove_interaction(self, scope):
+        repo = PeopleRepository(scope)
+        row = _create(repo, _person("P0001", "P"))
+
+        iid = repo.add_interaction(row, date="2024-05-01", channel="phone", summary="Caught up")
+        repo.session.flush()
+        assert iid == "int-1"
+
+        repo.update_interaction(row, "int-1", summary="Long catch-up call", connection_level=4)
+        repo.session.flush()
+        i = mapping.person_to_domain(repo.require("P0001")).interactions[0]
+        assert i.summary == "Long catch-up call" and i.connection_level == 4
+
+        # occurred_on_latest tracks a date edit (drives overdue queries)
+        repo.update_interaction(row, "int-1", date="2024-06")
+        repo.session.flush()
+        orm_i = repo.require("P0001").interactions[0]
+        assert orm_i.occurred_on_latest.isoformat() == "2024-06-30"
+
+        repo.remove_interaction(row, "int-1", reason="duplicate")
+        repo.session.flush()
+        assert mapping.person_to_domain(repo.require("P0001")).interactions == []
+
+    def test_clear_connection_level(self, scope):
+        repo = PeopleRepository(scope)
+        row = _create(repo, _person("P0001", "P"))
+        repo.add_interaction(row, date="2024-01-01", connection_level=3, summary="x")
+        repo.session.flush()
+        repo.update_interaction(row, "int-1", clear_connection_level=True)
+        repo.session.flush()
+        assert mapping.person_to_domain(repo.require("P0001")).interactions[0].connection_level is None

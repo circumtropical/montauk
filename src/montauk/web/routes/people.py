@@ -2,21 +2,26 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import ValidationError
 
 from ...dates import Birthday
+from ...db import models as orm
 from ...db.mapping import person_to_domain
 from ...db.repositories import (
+    LocalRecordNotFound,
     PeopleRepository,
     PersonNotFound,
+    RelatedPersonInvalid,
     RevisionRepository,
     WorkspaceScope,
 )
 from ...errors import MontaukValidationError
-from ...models import ContactInfo, Person
-from ...schema import CATEGORIES
+from ...models import ContactInfo, Person, Source
+from ...schema import CATEGORIES, Confidence
 from ...services.auth import AuthContext
 from ..app import TEMPLATES
 from ..deps import csrf_protect, page_context, require_auth, workspace_scope
@@ -24,6 +29,7 @@ from ..deps import csrf_protect, page_context, require_auth, workspace_scope
 router = APIRouter(prefix="/people")
 
 PAGE_SIZE = 50
+CONFIDENCE_LEVELS = [c.value for c in Confidence]
 
 
 def _lines(raw: str) -> list[str]:
@@ -100,7 +106,7 @@ def directory(
     )
 
 
-def _load(scope: WorkspaceScope, public_id: str):  # type: ignore[no-untyped-def]
+def _load(scope: WorkspaceScope, public_id: str) -> tuple[PeopleRepository, orm.Person]:
     repo = PeopleRepository(scope)
     try:
         return repo, repo.require(public_id, include_archived=True)
@@ -113,13 +119,13 @@ def _render_person(
     auth: AuthContext,
     scope: WorkspaceScope,
     repo: PeopleRepository,
-    row: object,
+    row: orm.Person,
     *,
     error: str | None = None,
     form: dict | None = None,
     status_code: int = 200,
 ) -> HTMLResponse:
-    domain = person_to_domain(row)  # type: ignore[arg-type]
+    domain = person_to_domain(row)
     facts_by_category = {
         c: [f for f in domain.facts if f.category == c and not f.related_person_id] for c in CATEGORIES
     }
@@ -131,7 +137,7 @@ def _render_person(
             rel_display[pid] = other.name
 
     interactions = sorted(domain.interactions, key=lambda i: i.date.latest(), reverse=True)
-    revisions = RevisionRepository(scope).for_person(row.id, limit=100)  # type: ignore[attr-defined]
+    revisions = RevisionRepository(scope).for_person(row.id, limit=100)
 
     return TEMPLATES.TemplateResponse(
         request,
@@ -141,8 +147,9 @@ def _render_person(
             auth,
             p=domain,
             row=row,
-            archived=row.archived_at is not None,  # type: ignore[attr-defined]
+            archived=row.archived_at is not None,
             categories=CATEGORIES,
+            confidence_levels=CONFIDENCE_LEVELS,
             facts_by_category=facts_by_category,
             relationships=relationships,
             rel_display=rel_display,
@@ -284,3 +291,209 @@ def restore(
     repo, row = _load(scope, public_id)
     repo.set_archived(row, False)
     return RedirectResponse(f"/people/{public_id}", status_code=303)
+
+
+# --- inline fact / interaction editing (spec 25.4) ------------------
+
+_OP_ERRORS = (ValidationError, RelatedPersonInvalid, LocalRecordNotFound, MontaukValidationError, ValueError)
+
+
+def _sources_from_form(raw: str) -> list[Source]:
+    out: list[Source] = []
+    for line in (raw or "").splitlines():
+        line = line.strip()
+        if not line or (":" not in line and "=" not in line):
+            continue
+        sep = ":" if ":" in line else "="
+        stype, _, sref = line.partition(sep)
+        if stype.strip() and sref.strip():
+            out.append(Source(type=stype.strip(), id=sref.strip()))
+    return out
+
+
+def _err_message(exc: Exception) -> str:
+    if isinstance(exc, ValidationError):
+        e = exc.errors()[0]
+        loc = ".".join(str(p) for p in e["loc"]) or "field"
+        return f"{loc}: {e['msg']}"
+    return str(exc)
+
+
+async def _run_op(
+    request: Request,
+    auth: AuthContext,
+    scope: WorkspaceScope,
+    public_id: str,
+    op: Callable[[PeopleRepository, orm.Person], object],
+) -> Response:
+    repo, row = _load(scope, public_id)
+    try:
+        op(repo, row)
+    except _OP_ERRORS as exc:
+        return _render_person(request, auth, scope, repo, row, error=_err_message(exc), status_code=400)
+    return RedirectResponse(f"/people/{public_id}", status_code=303)
+
+
+@router.post("/{public_id}/facts", response_class=HTMLResponse, dependencies=[Depends(csrf_protect)])
+async def add_fact(
+    request: Request,
+    public_id: str,
+    auth: AuthContext = Depends(require_auth),
+    scope: WorkspaceScope = Depends(workspace_scope),
+) -> Response:
+    f = await request.form()
+    return await _run_op(
+        request,
+        auth,
+        scope,
+        public_id,
+        lambda repo, row: repo.add_fact(
+            row,
+            category=str(f.get("category", "")),
+            text=str(f.get("text", "")),
+            date=_clean(str(f.get("date", ""))),
+            confidence=str(f.get("confidence", "high")) or "high",
+            related_person_id=_clean(str(f.get("related_person_id", ""))),
+            sources=_sources_from_form(str(f.get("sources", ""))),
+            reason=_clean(str(f.get("_reason", ""))),
+        ),
+    )
+
+
+@router.post(
+    "/{public_id}/facts/{local_id}", response_class=HTMLResponse, dependencies=[Depends(csrf_protect)]
+)
+async def update_fact(
+    request: Request,
+    public_id: str,
+    local_id: str,
+    auth: AuthContext = Depends(require_auth),
+    scope: WorkspaceScope = Depends(workspace_scope),
+) -> Response:
+    f = await request.form()
+    related = _clean(str(f.get("related_person_id", "")))
+    return await _run_op(
+        request,
+        auth,
+        scope,
+        public_id,
+        lambda repo, row: repo.update_fact(
+            row,
+            local_id,
+            text=str(f.get("text", "")),
+            category=str(f.get("category", "")),
+            date=str(f.get("date", "")),
+            confidence=str(f.get("confidence", "")) or None,
+            related_person_id=related,
+            clear_related=(related is None),
+            sources=_sources_from_form(str(f.get("sources", ""))),
+            reason=_clean(str(f.get("_reason", ""))),
+        ),
+    )
+
+
+@router.post(
+    "/{public_id}/facts/{local_id}/delete",
+    dependencies=[Depends(csrf_protect)],
+)
+async def delete_fact(
+    request: Request,
+    public_id: str,
+    local_id: str,
+    auth: AuthContext = Depends(require_auth),
+    scope: WorkspaceScope = Depends(workspace_scope),
+) -> Response:
+    f = await request.form()
+    return await _run_op(
+        request,
+        auth,
+        scope,
+        public_id,
+        lambda repo, row: repo.remove_fact(row, local_id, reason=_clean(str(f.get("_reason", "")))),
+    )
+
+
+@router.post("/{public_id}/interactions", response_class=HTMLResponse, dependencies=[Depends(csrf_protect)])
+async def add_interaction(
+    request: Request,
+    public_id: str,
+    auth: AuthContext = Depends(require_auth),
+    scope: WorkspaceScope = Depends(workspace_scope),
+) -> Response:
+    f = await request.form()
+    return await _run_op(
+        request,
+        auth,
+        scope,
+        public_id,
+        lambda repo, row: repo.add_interaction(
+            row,
+            date=str(f.get("date", "")),
+            channel=_clean(str(f.get("channel", ""))),
+            connection_level=_int_or_none(str(f.get("connection_level", ""))),
+            summary=_clean(str(f.get("summary", ""))),
+            sources=_sources_from_form(str(f.get("sources", ""))),
+            reason=_clean(str(f.get("_reason", ""))),
+        ),
+    )
+
+
+@router.post(
+    "/{public_id}/interactions/{local_id}",
+    response_class=HTMLResponse,
+    dependencies=[Depends(csrf_protect)],
+)
+async def update_interaction(
+    request: Request,
+    public_id: str,
+    local_id: str,
+    auth: AuthContext = Depends(require_auth),
+    scope: WorkspaceScope = Depends(workspace_scope),
+) -> Response:
+    f = await request.form()
+    level_raw = str(f.get("connection_level", "")).strip()
+    return await _run_op(
+        request,
+        auth,
+        scope,
+        public_id,
+        lambda repo, row: repo.update_interaction(
+            row,
+            local_id,
+            date=_clean(str(f.get("date", ""))),
+            channel=str(f.get("channel", "")),
+            connection_level=_int_or_none(level_raw),
+            clear_connection_level=(level_raw == ""),
+            summary=str(f.get("summary", "")),
+            sources=_sources_from_form(str(f.get("sources", ""))),
+            reason=_clean(str(f.get("_reason", ""))),
+        ),
+    )
+
+
+@router.post(
+    "/{public_id}/interactions/{local_id}/delete",
+    dependencies=[Depends(csrf_protect)],
+)
+async def delete_interaction(
+    request: Request,
+    public_id: str,
+    local_id: str,
+    auth: AuthContext = Depends(require_auth),
+    scope: WorkspaceScope = Depends(workspace_scope),
+) -> Response:
+    f = await request.form()
+    return await _run_op(
+        request,
+        auth,
+        scope,
+        public_id,
+        lambda repo, row: repo.remove_interaction(row, local_id, reason=_clean(str(f.get("_reason", "")))),
+    )
+
+
+def _int_or_none(raw: str) -> int | None:
+    raw = (raw or "").strip()
+    if not raw:
+        return None
+    return int(raw)  # ValueError -> handled by _run_op

@@ -15,12 +15,23 @@ from dataclasses import dataclass, field
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session, selectinload
 
-from ..ids import normalize_alias
+from ..ids import PERSON_ID_RE, next_fact_id, next_interaction_id, normalize_alias
+from ..models import Fact as DomainFact
+from ..models import Interaction as DomainInteraction
 from ..models import Person as DomainPerson
+from ..models import Source
 from . import ids as id_alloc
 from . import mapping
 from . import models as orm
 from .base import utcnow
+
+
+class LocalRecordNotFound(LookupError):
+    pass
+
+
+class RelatedPersonInvalid(ValueError):
+    pass
 
 
 class PersonNotFound(LookupError):
@@ -343,6 +354,351 @@ class PeopleRepository:
         ):
             row.contact_methods.append(method)
         self.session.flush()
+
+    # -- facts --
+
+    def _resolve_related(self, owner: orm.Person, related_public_id: str | None) -> uuid.UUID | None:
+        """Validate a structured relationship reference: well-formed id, not
+        the record's own, and resolves to a real person in this workspace
+        (active or archived). Returns the UUID, or None if no reference."""
+        if not related_public_id:
+            return None
+        rid = related_public_id.strip()
+        if rid == owner.public_id:
+            raise RelatedPersonInvalid("a record is about exactly one person; it cannot relate to itself")
+        if not PERSON_ID_RE.match(rid):
+            raise RelatedPersonInvalid(f"{rid!r} is not a valid person id (use a person's P-number)")
+        resolved = self.resolve_public_ids({rid})
+        if rid not in resolved:
+            raise RelatedPersonInvalid(f"no person {rid!r} in this workspace -- create or find them first")
+        return resolved[rid]
+
+    def add_fact(
+        self,
+        row: orm.Person,
+        *,
+        category: str,
+        text: str,
+        date: str | None = None,
+        confidence: str = "high",
+        related_person_id: str | None = None,
+        sources: list[Source] | None = None,
+        reason: str | None = None,
+    ) -> str:
+        local_id = next_fact_id(f.local_id for f in row.facts)
+        fact = DomainFact.model_validate(
+            {
+                "id": local_id,
+                "category": category,
+                "text": text,
+                "date": date or None,
+                "confidence": confidence,
+                "related_person_id": (related_person_id.strip() or None) if related_person_id else None,
+                "sources": sources or [],
+            }
+        )
+        related_uuid = self._resolve_related(row, fact.related_person_id)
+        date_text, precision = mapping.flexdate_columns(fact.date)
+        frow = orm.Fact(
+            workspace_id=self.workspace_id,
+            local_id=local_id,
+            category=fact.category,
+            text=fact.text,
+            date_text=date_text,
+            date_precision=precision,
+            confidence=fact.confidence.value,
+            authority="owner_curated",
+            related_person_public_id=fact.related_person_id,
+            related_person_id=related_uuid,
+        )
+        for s in fact.sources:
+            frow.sources.append(
+                orm.FactSource(workspace_id=self.workspace_id, source_type=s.type, source_ref=s.id)
+            )
+        row.facts.append(frow)
+        row.updated_at = utcnow()
+        self.session.flush()
+        self._log(
+            entity_type="fact",
+            entity_id=frow.id,
+            person_id=row.id,
+            field="__created__",
+            old=None,
+            new={"category": fact.category, "text": fact.text},
+            authority="owner_curated",
+            reason=reason,
+        )
+        return local_id
+
+    def _get_fact(self, row: orm.Person, local_id: str) -> orm.Fact:
+        for f in row.facts:
+            if f.local_id == local_id:
+                return f
+        raise LocalRecordNotFound(f"fact {local_id!r} not on {row.public_id}")
+
+    def update_fact(
+        self,
+        row: orm.Person,
+        local_id: str,
+        *,
+        text: str | None = None,
+        category: str | None = None,
+        date: str | None = None,
+        confidence: str | None = None,
+        related_person_id: str | None = None,
+        clear_related: bool = False,
+        sources: list[Source] | None = None,
+        reason: str | None = None,
+    ) -> None:
+        frow = self._get_fact(row, local_id)
+        current = DomainFact.model_validate(
+            {
+                "id": local_id,
+                "category": frow.category,
+                "text": frow.text,
+                "date": frow.date_text or None,
+                "confidence": frow.confidence,
+                "related_person_id": frow.related_person_public_id,
+                "sources": [Source(type=s.source_type, id=s.source_ref) for s in frow.sources],
+            }
+        )
+        new_related = current.related_person_id
+        if clear_related:
+            new_related = None
+        elif related_person_id is not None and related_person_id.strip():
+            new_related = related_person_id.strip()
+        updated = DomainFact.model_validate(
+            {
+                "id": local_id,
+                "category": category or current.category,
+                "text": text if text is not None else current.text,
+                "date": (date or None) if date is not None else current.date,
+                "confidence": confidence or current.confidence.value,
+                "related_person_id": new_related,
+                "sources": sources if sources is not None else current.sources,
+            }
+        )
+        related_uuid = self._resolve_related(row, updated.related_person_id)
+
+        changes: dict[str, tuple[object, object]] = {}
+        if updated.text != current.text:
+            changes["text"] = (current.text, updated.text)
+        if updated.category != current.category:
+            changes["category"] = (current.category, updated.category)
+        old_date = current.date.to_string() if current.date else None
+        new_date = updated.date.to_string() if updated.date else None
+        if old_date != new_date:
+            changes["date"] = (old_date, new_date)
+        if updated.confidence != current.confidence:
+            changes["confidence"] = (current.confidence.value, updated.confidence.value)
+        if updated.related_person_id != current.related_person_id:
+            changes["related_person_id"] = (current.related_person_id, updated.related_person_id)
+
+        date_text, precision = mapping.flexdate_columns(updated.date)
+        frow.category = updated.category
+        frow.text = updated.text
+        frow.date_text = date_text
+        frow.date_precision = precision
+        frow.confidence = updated.confidence.value
+        frow.related_person_public_id = updated.related_person_id
+        frow.related_person_id = related_uuid
+        if sources is not None:
+            frow.sources.clear()
+            self.session.flush()
+            for s in sources:
+                frow.sources.append(
+                    orm.FactSource(workspace_id=self.workspace_id, source_type=s.type, source_ref=s.id)
+                )
+        # An owner edit lifts the fact to owner-curated authority.
+        frow.authority = "owner_curated"
+        row.updated_at = utcnow()
+        self.session.flush()
+        for fld, (old, new) in changes.items():
+            self._log(
+                entity_type="fact",
+                entity_id=frow.id,
+                person_id=row.id,
+                field=fld,
+                old=old,
+                new=new,
+                authority="owner_curated",
+                reason=reason,
+            )
+
+    def remove_fact(self, row: orm.Person, local_id: str, *, reason: str | None = None) -> None:
+        frow = self._get_fact(row, local_id)
+        snapshot = {"category": frow.category, "text": frow.text}
+        fact_uuid = frow.id
+        row.facts.remove(frow)
+        row.updated_at = utcnow()
+        self.session.flush()
+        self._log(
+            entity_type="fact",
+            entity_id=fact_uuid,
+            person_id=row.id,
+            field="__removed__",
+            old=snapshot,
+            new=None,
+            authority="owner_curated",
+            reason=reason,
+        )
+
+    # -- interactions --
+
+    def _get_interaction(self, row: orm.Person, local_id: str) -> orm.Interaction:
+        for i in row.interactions:
+            if i.local_id == local_id:
+                return i
+        raise LocalRecordNotFound(f"interaction {local_id!r} not on {row.public_id}")
+
+    def add_interaction(
+        self,
+        row: orm.Person,
+        *,
+        date: str,
+        channel: str | None = None,
+        connection_level: int | None = None,
+        summary: str | None = None,
+        sources: list[Source] | None = None,
+        reason: str | None = None,
+    ) -> str:
+        local_id = next_interaction_id(i.local_id for i in row.interactions)
+        interaction = DomainInteraction.model_validate(
+            {
+                "id": local_id,
+                "date": date,
+                "channel": channel or None,
+                "connection_level": connection_level,
+                "summary": summary or None,
+                "sources": sources or [],
+            }
+        )
+        date_text, precision = mapping.flexdate_columns_required(interaction.date)
+        irow = orm.Interaction(
+            workspace_id=self.workspace_id,
+            local_id=local_id,
+            date_text=date_text,
+            date_precision=precision,
+            occurred_on_latest=interaction.date.latest(),
+            channel=interaction.channel,
+            connection_level=interaction.connection_level,
+            summary=interaction.summary,
+            authority="owner_curated",
+        )
+        for s in interaction.sources:
+            irow.sources.append(
+                orm.InteractionSource(workspace_id=self.workspace_id, source_type=s.type, source_ref=s.id)
+            )
+        row.interactions.append(irow)
+        row.updated_at = utcnow()
+        self.session.flush()
+        self._log(
+            entity_type="interaction",
+            entity_id=irow.id,
+            person_id=row.id,
+            field="__created__",
+            old=None,
+            new={"date": interaction.date.to_string(), "summary": interaction.summary},
+            authority="owner_curated",
+            reason=reason,
+        )
+        return local_id
+
+    def update_interaction(
+        self,
+        row: orm.Person,
+        local_id: str,
+        *,
+        date: str | None = None,
+        channel: str | None = None,
+        connection_level: int | None = None,
+        clear_connection_level: bool = False,
+        summary: str | None = None,
+        sources: list[Source] | None = None,
+        reason: str | None = None,
+    ) -> None:
+        irow = self._get_interaction(row, local_id)
+        current = DomainInteraction.model_validate(
+            {
+                "id": local_id,
+                "date": irow.date_text,
+                "channel": irow.channel,
+                "connection_level": irow.connection_level,
+                "summary": irow.summary,
+                "sources": [Source(type=s.source_type, id=s.source_ref) for s in irow.sources],
+            }
+        )
+        new_level = (
+            None
+            if clear_connection_level
+            else (connection_level if connection_level is not None else current.connection_level)
+        )
+        updated = DomainInteraction.model_validate(
+            {
+                "id": local_id,
+                "date": date or current.date.to_string(),
+                "channel": (channel if channel is not None else current.channel) or None,
+                "connection_level": new_level,
+                "summary": (summary if summary is not None else current.summary) or None,
+                "sources": sources if sources is not None else current.sources,
+            }
+        )
+        changes: dict[str, tuple[object, object]] = {}
+        if updated.date.to_string() != current.date.to_string():
+            changes["date"] = (current.date.to_string(), updated.date.to_string())
+        if updated.channel != current.channel:
+            changes["channel"] = (current.channel, updated.channel)
+        if updated.connection_level != current.connection_level:
+            changes["connection_level"] = (current.connection_level, updated.connection_level)
+        if updated.summary != current.summary:
+            changes["summary"] = (current.summary, updated.summary)
+
+        date_text, precision = mapping.flexdate_columns_required(updated.date)
+        irow.date_text = date_text
+        irow.date_precision = precision
+        irow.occurred_on_latest = updated.date.latest()
+        irow.channel = updated.channel
+        irow.connection_level = updated.connection_level
+        irow.summary = updated.summary
+        if sources is not None:
+            irow.sources.clear()
+            self.session.flush()
+            for s in sources:
+                irow.sources.append(
+                    orm.InteractionSource(workspace_id=self.workspace_id, source_type=s.type, source_ref=s.id)
+                )
+        irow.authority = "owner_curated"
+        row.updated_at = utcnow()
+        self.session.flush()
+        for fld, (old, new) in changes.items():
+            self._log(
+                entity_type="interaction",
+                entity_id=irow.id,
+                person_id=row.id,
+                field=fld,
+                old=old,
+                new=new,
+                authority="owner_curated",
+                reason=reason,
+            )
+
+    def remove_interaction(self, row: orm.Person, local_id: str, *, reason: str | None = None) -> None:
+        irow = self._get_interaction(row, local_id)
+        snapshot = {"date": irow.date_text, "summary": irow.summary}
+        interaction_uuid = irow.id
+        row.interactions.remove(irow)
+        row.updated_at = utcnow()
+        self.session.flush()
+        self._log(
+            entity_type="interaction",
+            entity_id=interaction_uuid,
+            person_id=row.id,
+            field="__removed__",
+            old=snapshot,
+            new=None,
+            authority="owner_curated",
+            reason=reason,
+        )
 
     # -- internals --
 

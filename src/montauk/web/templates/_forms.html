@@ -1,0 +1,46 @@
+{# Reusable fact / interaction edit forms. #}
+
+{% macro fact_fields(f, categories, confidence_levels) %}
+  <div><label>Category
+    <select name="category">
+      {% for c in categories %}
+      <option value="{{ c }}" {{ 'selected' if f and f.category == c }}>{{ c }}</option>
+      {% endfor %}
+    </select></label></div>
+  <div class="wide"><label>Text
+    <textarea name="text" rows="2" required>{{ f.text if f else '' }}</textarea></label></div>
+  <div><label>Date (optional; YYYY, YYYY-MM, or YYYY-MM-DD)
+    <input type="text" name="date" value="{{ f.date.to_string() if f and f.date else '' }}"></label></div>
+  <div><label>Confidence
+    <select name="confidence">
+      {% for lvl in confidence_levels %}
+      <option value="{{ lvl }}" {{ 'selected' if (f.confidence.value if f else 'high') == lvl }}>{{ lvl }}</option>
+      {% endfor %}
+    </select></label></div>
+  <div><label>Related person (optional P-number &rarr; makes this a relationship)
+    <input type="text" name="related_person_id"
+      value="{{ f.related_person_id if f and f.related_person_id else '' }}" placeholder="P0001"></label></div>
+  <div><label>Sources (optional, <code>type: ref</code> per line)
+    <textarea name="sources" rows="2">{% if f %}{% for s in f.sources %}{{ s.type }}: {{ s.id }}
+{% endfor %}{% endif %}</textarea></label></div>
+  <div class="wide"><label>Change note (optional)
+    <input type="text" name="_reason"></label></div>
+{% endmacro %}
+
+{% macro interaction_fields(i) %}
+  <div><label>Date (YYYY, YYYY-MM, or YYYY-MM-DD)
+    <input type="text" name="date" value="{{ i.date.to_string() if i and i.date else '' }}" required></label></div>
+  <div><label>Channel (optional)
+    <input type="text" name="channel" value="{{ i.channel if i and i.channel else '' }}"
+      placeholder="phone, text, email, in-person"></label></div>
+  <div><label>Connection level (optional, 1&ndash;6)
+    <input type="number" name="connection_level" min="1" max="6"
+      value="{{ i.connection_level if i and i.connection_level else '' }}"></label></div>
+  <div class="wide"><label>Summary (optional)
+    <textarea name="summary" rows="2">{{ i.summary if i and i.summary else '' }}</textarea></label></div>
+  <div><label>Sources (optional, <code>type: ref</code> per line)
+    <textarea name="sources" rows="2">{% if i %}{% for s in i.sources %}{{ s.type }}: {{ s.id }}
+{% endfor %}{% endif %}</textarea></label></div>
+  <div class="wide"><label>Change note (optional)
+    <input type="text" name="_reason"></label></div>
+{% endmacro %}

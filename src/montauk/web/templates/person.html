@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_forms.html" import fact_fields, interaction_fields %}
 {% block title %}{{ p.name }} &middot; Montauk{% endblock %}
 {% block body %}
   <p class="muted"><a href="/people">&larr; People</a></p>
@@ -63,39 +64,66 @@
     </form>
   </div>
 
+  {% macro fact_row(f, relationship=False) %}
+    <div class="fact">
+      <div>{{ f.text }}</div>
+      <div class="meta">{{ f.id }}
+        {%- if not relationship %} &middot; {{ f.category }}{% endif %}
+        {%- if f.date %} &middot; {{ f.date.to_string() }}{% endif %}
+        {%- if f.confidence and f.confidence.value != 'high' %} &middot; {{ f.confidence.value }} confidence{% endif %}
+        {%- if relationship %} &middot; &rarr;
+          {% if rel_display.get(f.related_person_id) -%}
+            <a href="/people/{{ f.related_person_id }}">{{ rel_display[f.related_person_id] }} ({{ f.related_person_id }})</a>
+          {%- else -%}
+            <span title="referenced person not found">{{ f.related_person_id }} (missing)</span>
+          {%- endif %}
+        {%- endif %}
+        {%- for s in f.sources %} &middot; source: {{ s.type }}/{{ s.id }}{% endfor %}
+      </div>
+      <div class="row-actions">
+        <details>
+          <summary>Edit</summary>
+          <form method="post" action="/people/{{ p.id }}/facts/{{ f.id }}" class="edit-grid">
+            <input type="hidden" name="_csrf" value="{{ csrf }}">
+            {{ fact_fields(f, categories, confidence_levels) }}
+            <div class="wide"><button type="submit">Save fact</button></div>
+          </form>
+        </details>
+        <form method="post" action="/people/{{ p.id }}/facts/{{ f.id }}/delete" class="inline"
+              data-confirm="Remove this fact?">
+          <input type="hidden" name="_csrf" value="{{ csrf }}">
+          <button type="submit" class="danger">Remove</button>
+        </form>
+      </div>
+    </div>
+  {% endmacro %}
+
   <div class="card facts">
     <h2>Facts</h2>
     {% for category in categories %}
       {% set items = facts_by_category[category] %}
       <h3>{{ category }}</h3>
       {% if items %}
-        {% for f in items %}
-        <div class="fact">
-          <div>{{ f.text }}</div>
-          <div class="meta">{{ f.id }}{% if f.date %} &middot; {{ f.date.to_string() }}{% endif %}{% if f.confidence and f.confidence.value != 'high' %} &middot; {{ f.confidence.value }} confidence{% endif %}
-            {% for s in f.sources %} &middot; source: {{ s.type }}/{{ s.id }}{% endfor %}</div>
-        </div>
-        {% endfor %}
+        {% for f in items %}{{ fact_row(f) }}{% endfor %}
       {% else %}<p class="muted">&mdash;</p>{% endif %}
     {% endfor %}
+
+    <details class="add">
+      <summary>&#65291; Add a fact</summary>
+      <form method="post" action="/people/{{ p.id }}/facts" class="edit-grid">
+        <input type="hidden" name="_csrf" value="{{ csrf }}">
+        {{ fact_fields(none, categories, confidence_levels) }}
+        <div class="wide"><button type="submit">Add fact</button></div>
+      </form>
+    </details>
   </div>
 
   <div class="card">
     <h2>Relationships</h2>
     {% if relationships %}
-      {% for f in relationships %}
-      <div class="fact">
-        <div>{{ f.text }}</div>
-        <div class="meta">{{ f.id }} &middot; {{ f.category }} &rarr;
-          {% if rel_display.get(f.related_person_id) %}
-            <a href="/people/{{ f.related_person_id }}">{{ rel_display[f.related_person_id] }} ({{ f.related_person_id }})</a>
-          {% else %}
-            <span title="referenced person not found">{{ f.related_person_id }} (missing)</span>
-          {% endif %}
-        </div>
-      </div>
-      {% endfor %}
-    {% else %}<p class="muted">No explicit relationships recorded.</p>{% endif %}
+      {% for f in relationships %}{{ fact_row(f, relationship=True) }}{% endfor %}
+    {% else %}<p class="muted">No explicit relationships recorded. Add a fact with a
+      &ldquo;Related person&rdquo; P-number to create one.</p>{% endif %}
   </div>
 
   <div class="card">
@@ -104,10 +132,35 @@
       {% for i in interactions %}
       <div class="interaction">
         <div>{{ i.summary or '(no summary)' }}</div>
-        <div class="meta">{{ i.id }} &middot; {{ i.date.to_string() }}{% if i.channel %} &middot; {{ i.channel }}{% endif %}{% if i.connection_level %} &middot; level {{ i.connection_level }}{% endif %}</div>
+        <div class="meta">{{ i.id }} &middot; {{ i.date.to_string() }}{% if i.channel %} &middot; {{ i.channel }}{% endif %}{% if i.connection_level %} &middot; level {{ i.connection_level }}{% endif %}
+          {%- for s in i.sources %} &middot; source: {{ s.type }}/{{ s.id }}{% endfor %}</div>
+        <div class="row-actions">
+          <details>
+            <summary>Edit</summary>
+            <form method="post" action="/people/{{ p.id }}/interactions/{{ i.id }}" class="edit-grid">
+              <input type="hidden" name="_csrf" value="{{ csrf }}">
+              {{ interaction_fields(i) }}
+              <div class="wide"><button type="submit">Save interaction</button></div>
+            </form>
+          </details>
+          <form method="post" action="/people/{{ p.id }}/interactions/{{ i.id }}/delete" class="inline"
+                data-confirm="Remove this interaction?">
+            <input type="hidden" name="_csrf" value="{{ csrf }}">
+            <button type="submit" class="danger">Remove</button>
+          </form>
+        </div>
       </div>
       {% endfor %}
     {% else %}<p class="muted">No interactions recorded.</p>{% endif %}
+
+    <details class="add">
+      <summary>&#65291; Add an interaction</summary>
+      <form method="post" action="/people/{{ p.id }}/interactions" class="edit-grid">
+        <input type="hidden" name="_csrf" value="{{ csrf }}">
+        {{ interaction_fields(none) }}
+        <div class="wide"><button type="submit">Add interaction</button></div>
+      </form>
+    </details>
   </div>
 
   <div class="card">
