@@ -41,4 +41,75 @@
       if (sel.form) sel.form.submit();
     });
   });
+
+  // Settings › Model & provider: the provider choice drives everything, so
+  // show only the fields that provider needs and match the model suggestions
+  // to it. Without JS every field is visible (the form still works).
+  document.querySelectorAll("select[data-model-provider]").forEach(function (sel) {
+    var form = sel.form;
+    if (!form) return;
+    var modelInput = form.querySelector("input[data-model-input]");
+
+    function apply() {
+      var provider = sel.value;
+      form.querySelectorAll("[data-when-provider]").forEach(function (el) {
+        var allowed = el.getAttribute("data-when-provider").split(/\s+/);
+        el.hidden = allowed.indexOf(provider) === -1;
+      });
+      if (modelInput) {
+        var id = modelInput.getAttribute("data-datalist-prefix") + "-" + provider;
+        modelInput.setAttribute("list", document.getElementById(id) ? id : "");
+        if (!modelInput.value) {
+          modelInput.placeholder =
+            provider === "none" ? "pick a provider first" : "e.g. " + (function () {
+              var dl = document.getElementById(id);
+              var opt = dl && dl.querySelector("option");
+              return opt ? opt.value : "model name";
+            })();
+        }
+      }
+    }
+    sel.addEventListener("change", apply);
+    apply();
+  });
+
+  // Settings › Test connection: run it in the background, show a spinner then
+  // a ✓ / ✗ with the message just to the right of the button. Falls back to a
+  // normal form submit (full page reload) when this handler is absent.
+  document.querySelectorAll("button[data-test-connection]").forEach(function (btn) {
+    var form = btn.form;
+    if (!form) return;
+    var url = btn.getAttribute("formaction") || form.getAttribute("action");
+
+    var status = document.createElement("span");
+    status.className = "test-status";
+    status.setAttribute("aria-live", "polite");
+    btn.parentNode.insertBefore(status, btn.nextSibling);
+
+    btn.addEventListener("click", function (e) {
+      e.preventDefault();
+      btn.disabled = true;
+      status.className = "test-status is-testing";
+      status.innerHTML = '<span class="spinner" aria-hidden="true"></span>Testing…';
+
+      fetch(url, {
+        method: "POST",
+        body: new FormData(form),
+        headers: { Accept: "application/json" },
+        credentials: "same-origin",
+      })
+        .then(function (r) {
+          return r.json().then(
+            function (d) { return d; },
+            function () { return { ok: false, message: "unexpected response" }; }
+          );
+        })
+        .catch(function () { return { ok: false, message: "request failed" }; })
+        .then(function (res) {
+          btn.disabled = false;
+          status.className = "test-status " + (res.ok ? "is-ok" : "is-fail");
+          status.textContent = (res.ok ? "✓ " : "✗ ") + (res.message || "");
+        });
+    });
+  });
 })();

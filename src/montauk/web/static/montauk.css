@@ -128,6 +128,20 @@ details.add > summary { font-weight: 600; font-size: 0.95rem; }
 }
 .pw-toggle:hover { color: var(--text); }
 
+/* Settings › Test connection: keep the button and its result on one line. */
+.test-row { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; }
+.test-status { font-size: 0.9rem; display: inline-flex; align-items: center; gap: 0.35rem; }
+.test-status.is-ok { color: var(--accent); }
+.test-status.is-fail { color: var(--danger); }
+.test-status.is-testing { color: var(--muted); }
+.spinner {
+  width: 0.9rem; height: 0.9rem; border-radius: 50%;
+  border: 2px solid var(--border); border-top-color: var(--muted);
+  display: inline-block; animation: spin 0.7s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .spinner { animation-duration: 2s; } }
+
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 @media (max-width: 640px) {
   .topbar { gap: 0.5rem; }

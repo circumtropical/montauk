@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import uuid
 
-from fastapi import APIRouter, Depends, Request
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi import APIRouter, Depends, Request, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -174,39 +174,43 @@ async def save_model(
     return _page(request, auth, session, flash=f"{purpose.title()} model configuration saved.")
 
 
-@router.post("/model/{purpose}/test", response_class=HTMLResponse, dependencies=[Depends(csrf_protect)])
+@router.post("/model/{purpose}/test", dependencies=[Depends(csrf_protect)])
 async def test_model(
     request: Request,
     purpose: str,
     auth: AuthContext = Depends(require_auth),
     session: Session = Depends(db_session),
-) -> HTMLResponse:
+) -> Response:
+    # The button is a real form submit (works with no JS -> full page reload
+    # with a flash). montauk.js sends `Accept: application/json` and renders
+    # the result inline next to the button instead.
+    wants_json = "application/json" in request.headers.get("accept", "")
+
+    def done(*, ok: bool, message: str, status_code: int = 200) -> Response:
+        if wants_json:
+            return JSONResponse({"ok": ok, "message": message}, status_code=status_code)
+        if ok:
+            return _page(request, auth, session, flash=message)
+        return _page(request, auth, session, error=message, status_code=max(status_code, 400))
+
     if purpose not in PURPOSES:
-        return _page(request, auth, session, error="unknown purpose", status_code=400)
+        return done(ok=False, message="unknown purpose", status_code=400)
     try:
         resolved = model_config.resolve(
             session, auth.workspace_id, purpose, secret_box=get_state(request).secret_box
         )
     except model_config.ModelConfigError as exc:
-        return _page(request, auth, session, error=str(exc), status_code=400)
+        return done(ok=False, message=str(exc), status_code=400)
     provider = build_provider(resolved)
     if provider is None:
-        return _page(request, auth, session, error=f"no {purpose} model is configured")
+        return done(ok=False, message=f"No {purpose} model is configured yet.")
     try:
         result = await provider.healthcheck()
     except LLMError as exc:
-        return _page(
-            request,
-            auth,
-            session,
-            error=f"{purpose} model test failed ({exc.category}): {exc}",
-            status_code=400,
-        )
-    return _page(
-        request,
-        auth,
-        session,
-        flash=f"{purpose.title()} model OK -- {result.model} replied ({result.output_tokens} tokens).",
+        return done(ok=False, message=f"Test failed ({exc.category}): {exc}", status_code=400)
+    return done(
+        ok=True,
+        message=f"{result.model} replied ({result.output_tokens} tokens).",
     )
 
 

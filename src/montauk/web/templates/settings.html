@@ -96,36 +96,50 @@
       </summary>
       <form method="post" action="/settings/model/{{ purpose }}" class="edit-grid">
         <input type="hidden" name="_csrf" value="{{ csrf }}">
-        <div><label>Provider
+        <div class="wide"><label>Provider &mdash; choose this first
           <select name="provider_type" data-model-provider>
             {% for pt in provider_types %}
             <option value="{{ pt }}" {{ 'selected' if mv.provider_type == pt }}>{{ provider_labels.get(pt, pt) }}</option>
             {% endfor %}
           </select></label></div>
-        <div><label>Model
-          <input type="text" name="model" value="{{ mv.model }}" list="models-{{ purpose }}"
-            placeholder="e.g. claude-haiku-4-5">
-          <datalist id="models-{{ purpose }}">
-            {% for pt, models in model_suggestions.items() %}{% for m in models %}<option value="{{ m }}">{% endfor %}{% endfor %}
-          </datalist></label></div>
-        <div><label>Base URL (OpenAI-compatible only)
+
+        {% for pt, models in model_suggestions.items() %}
+        <datalist id="models-{{ purpose }}-{{ pt }}">
+          {% for m in models %}<option value="{{ m }}">{% endfor %}
+        </datalist>
+        {% endfor %}
+
+        <div data-when-provider="anthropic_api openai_compatible claude_cli codex_cli"><label>Model
+          <input type="text" name="model" value="{{ mv.model }}"
+            data-model-input data-datalist-prefix="models-{{ purpose }}"
+            list="models-{{ purpose }}-{{ mv.provider_type if mv.provider_type != 'none' else 'anthropic_api' }}"
+            placeholder="pick a provider first"></label></div>
+
+        <div data-when-provider="openai_compatible"><label>Base URL
           <input type="text" name="base_url" value="{{ mv.base_url }}" placeholder="http://localhost:11434/v1"></label></div>
-        <div><label>CLI binary (claude / codex CLI only, optional)
+
+        <div data-when-provider="claude_cli codex_cli"><label>CLI binary <span class="muted">(optional)</span>
           <input type="text" name="cli_binary" value="{{ mv.cli_binary }}" placeholder="claude"></label></div>
-        <div><label>API key {% if mv.has_api_key %}<span class="muted">(stored &mdash; leave blank to keep)</span>{% endif %}
+
+        <div data-when-provider="anthropic_api openai_compatible"><label>API key
+          {% if mv.has_api_key %}<span class="muted">(stored &mdash; leave blank to keep)</span>{% endif %}
           <input type="password" name="api_key" autocomplete="off" data-reveal
             placeholder="{{ 'unchanged' if mv.has_api_key else 'sk-...' }}"></label></div>
-        <div><label style="display:flex;gap:0.4rem;align-items:center">
+        <div data-when-provider="anthropic_api openai_compatible"><label style="display:flex;gap:0.4rem;align-items:center">
           <input type="checkbox" name="clear_api_key" value="1" style="width:auto"> Remove stored key</label></div>
-        <div><label>Price $/1M input (optional, for estimates)
+
+        <div data-when-provider="anthropic_api openai_compatible"><label>Price $/1M input <span class="muted">(optional, for cost estimates)</span>
           <input type="text" name="price_input" value="{{ mv.price_input_per_mtok }}" placeholder="1.00"></label></div>
-        <div><label>Price $/1M output (optional)
+        <div data-when-provider="anthropic_api openai_compatible"><label>Price $/1M output <span class="muted">(optional)</span>
           <input type="text" name="price_output" value="{{ mv.price_output_per_mtok }}" placeholder="5.00"></label></div>
-        <div><label style="display:flex;gap:0.4rem;align-items:center">
+
+        <div data-when-provider="anthropic_api openai_compatible claude_cli codex_cli"><label style="display:flex;gap:0.4rem;align-items:center">
           <input type="checkbox" name="disabled" value="1" style="width:auto" {{ 'checked' if not mv.enabled }}> Disabled</label></div>
-        <div class="wide">
+
+        <div class="wide test-row">
           <button type="submit">Save {{ purpose }} model</button>
-          <button type="submit" formaction="/settings/model/{{ purpose }}/test" class="secondary">Test connection</button>
+          <button type="submit" formaction="/settings/model/{{ purpose }}/test" class="secondary"
+            data-test-connection>Test connection</button>
         </div>
       </form>
     </details>

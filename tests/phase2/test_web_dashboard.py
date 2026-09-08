@@ -594,6 +594,74 @@ class TestLLMDashboard:
         )
         assert r.status_code == 400 and "base URL" in r.text
 
+    def test_model_form_marks_fields_by_provider(self, logged_in):
+        html = logged_in.get("/settings").text
+        # the JS hook + per-provider gating attributes are present
+        assert "data-model-provider" in html
+        assert 'data-when-provider="openai_compatible"' in html  # base URL
+        assert 'id="models-summarization-claude_cli"' in html  # per-provider suggestions
+        assert "data-test-connection" in html
+
+    def test_test_connection_returns_json_for_fetch(self, logged_in, monkeypatch):
+        from montauk.llm.providers.fake import FakeProvider
+        from montauk.web.routes import settings as settings_routes
+
+        csrf = _csrf(logged_in, "/settings")
+        logged_in.post(
+            "/settings/model/summarization",
+            data={"_csrf": csrf, "provider_type": "claude_cli", "model": "claude-haiku-4-5"},
+        )
+        monkeypatch.setattr(
+            settings_routes, "build_provider", lambda cfg: FakeProvider(model="claude-haiku-4-5")
+        )
+        r = logged_in.post(
+            "/settings/model/summarization/test",
+            data={"_csrf": csrf},
+            headers={"Accept": "application/json"},
+        )
+        assert r.status_code == 200
+        body = r.json()
+        assert body["ok"] is True and "claude-haiku-4-5" in body["message"]
+
+    def test_test_connection_json_reports_failure(self, logged_in, monkeypatch):
+        from montauk.llm.base import LLMRateLimited
+        from montauk.llm.providers.fake import FakeProvider
+        from montauk.web.routes import settings as settings_routes
+
+        csrf = _csrf(logged_in, "/settings")
+        logged_in.post(
+            "/settings/model/summarization",
+            data={"_csrf": csrf, "provider_type": "claude_cli", "model": "m"},
+        )
+        monkeypatch.setattr(
+            settings_routes,
+            "build_provider",
+            lambda cfg: FakeProvider(fail_with=LLMRateLimited("slow down")),
+        )
+        r = logged_in.post(
+            "/settings/model/summarization/test",
+            data={"_csrf": csrf},
+            headers={"Accept": "application/json"},
+        )
+        assert r.status_code == 400
+        assert r.json()["ok"] is False and "rate_limit" in r.json()["message"]
+
+    def test_test_connection_without_js_still_reloads_the_page(self, logged_in, monkeypatch):
+        from montauk.llm.providers.fake import FakeProvider
+        from montauk.web.routes import settings as settings_routes
+
+        csrf = _csrf(logged_in, "/settings")
+        logged_in.post(
+            "/settings/model/summarization",
+            data={"_csrf": csrf, "provider_type": "claude_cli", "model": "claude-haiku-4-5"},
+        )
+        monkeypatch.setattr(
+            settings_routes, "build_provider", lambda cfg: FakeProvider(model="claude-haiku-4-5")
+        )
+        r = logged_in.post("/settings/model/summarization/test", data={"_csrf": csrf})
+        assert r.status_code == 200 and "text/html" in r.headers["content-type"]
+        assert "claude-haiku-4-5 replied" in r.text
+
     def test_save_cost_controls_and_pause_blocks_home_card(self, logged_in):
         csrf = _csrf(logged_in, "/settings")
         logged_in.post(
