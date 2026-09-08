@@ -26,6 +26,15 @@ def build_mcp2_app(
     require_auth: bool = True,
 ) -> Starlette:
     server = create_mcp2_server(ctx)
+    # Explicitly disable the SDK's Host/Origin allowlist. Left as None, the
+    # SDK enables it with a localhost-only allowlist whenever host is
+    # loopback (server.py), which 421s every request a reverse proxy
+    # forwards with the real Host. The bearer-token gate -- not a Host
+    # allowlist -- is what keeps this server closed; DNS-rebinding attacks
+    # target browsers reaching localhost dev servers, not an authenticated
+    # server-to-server API behind TLS.
+    if transport_security is None:
+        transport_security = TransportSecuritySettings(enable_dns_rebinding_protection=False)
     app = server.streamable_http_app(host=host, transport_security=transport_security)
     if require_auth:
         app.add_middleware(BearerAuthMiddleware, session_factory=ctx.session_factory)
