@@ -1,0 +1,17 @@
+{% extends "base.html" %}
+{% block title %}Sign in &middot; Montauk{% endblock %}
+{% block body %}
+  <h1>Montauk</h1>
+  <p class="muted">Sign in to your relationship memory.</p>
+  <form method="post" action="/login" class="stack">
+    <div>
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" autocomplete="username" required autofocus>
+    </div>
+    <div>
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" required>
+    </div>
+    <button type="submit">Sign in</button>
+  </form>
+{% endblock %}

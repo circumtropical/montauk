@@ -1,0 +1,258 @@
+"""Dashboard end-to-end cases (spec 32.7). Uses a real ASGI test client
+over the PostgreSQL testcontainer."""
+
+from __future__ import annotations
+
+import pytest
+
+from montauk.db.repositories import Actor, PeopleRepository, WorkspaceScope
+from montauk.models import Fact, Interaction, Person
+from montauk.phase2_migration import run_migration
+from montauk.services.workspace import get_or_create_workspace
+
+from ._phase1_fixtures import write_golden
+
+OWNER = {
+    "email": "owner@example.com",
+    "password": "correct-horse-staple",
+    "password_confirm": "correct-horse-staple",
+    "workspace_name": "Personal",
+    "deployment_profile": "private",
+    "public_url": "",
+}
+
+
+def _setup_owner(client) -> None:
+    r = client.post("/setup", data=OWNER)
+    assert r.status_code in (200, 303)
+
+
+def _login(client) -> None:
+    client.post("/login", data={"email": OWNER["email"], "password": OWNER["password"]})
+
+
+def _csrf(client, path: str = "/") -> str:
+    # Every authenticated page embeds the session CSRF token in the logout form.
+    html = client.get(path).text
+    marker = 'name="_csrf" value="'
+    i = html.index(marker) + len(marker)
+    return html[i : html.index('"', i)]
+
+
+class TestFirstRun:
+    def test_uninitialized_deployment_redirects_to_setup(self, client):
+        r = client.get("/", follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/setup"
+
+    def test_setup_creates_owner_and_logs_in(self, client):
+        r = client.post("/setup", data=OWNER, follow_redirects=False)
+        assert r.status_code == 303
+        assert client.get("/").status_code == 200  # cookie is set
+
+    def test_second_setup_attempt_cannot_seize_ownership(self, client):
+        _setup_owner(client)
+        fresh = client.__class__(client.app)
+        r = fresh.post(
+            "/setup",
+            data={**OWNER, "email": "attacker@example.com"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303 and r.headers["location"] == "/"
+        # attacker is not logged in as anyone
+        assert fresh.get("/", follow_redirects=False).status_code == 303
+
+    def test_weak_password_is_rejected(self, client):
+        r = client.post("/setup", data={**OWNER, "password": "short", "password_confirm": "short"})
+        assert r.status_code == 400
+        assert "at least 10" in r.text
+
+
+class TestAuth:
+    def test_login_logout_cycle(self, client):
+        _setup_owner(client)
+        client.post("/logout", data={"_csrf": _csrf(client)})
+        assert client.get("/", follow_redirects=False).status_code == 303
+
+        bad = client.post("/login", data={"email": OWNER["email"], "password": "wrong"})
+        assert bad.status_code == 401
+
+        _login(client)
+        assert client.get("/").status_code == 200
+
+    def test_rate_limit_locks_after_repeated_failures(self, client):
+        _setup_owner(client)
+        client.post("/logout", data={"_csrf": _csrf(client)})
+        for _ in range(5):
+            client.post("/login", data={"email": OWNER["email"], "password": "wrong"})
+        locked = client.post("/login", data={"email": OWNER["email"], "password": OWNER["password"]})
+        assert locked.status_code == 429
+
+    def test_csrf_required_for_post(self, client):
+        _setup_owner(client)
+        r = client.post("/logout", data={"_csrf": "bogus"})
+        assert r.status_code == 403
+
+    def test_unauthenticated_person_page_redirects_to_login(self, client):
+        _setup_owner(client)
+        client.post("/logout", data={"_csrf": _csrf(client)})
+        r = client.get("/people/P0001", follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/login"
+
+    def test_security_headers_present(self, client):
+        r = client.get("/setup")
+        assert r.headers["x-frame-options"] == "DENY"
+        assert "default-src 'self'" in r.headers["content-security-policy"]
+
+
+class TestWithMigratedData:
+    @pytest.fixture
+    def populated(self, client, session_maker, tmp_path):
+        _setup_owner(client)
+        src = write_golden(tmp_path / "p1")
+        # migrate into the same workspace slug the wizard created ("personal")
+        report = run_migration(
+            session_maker,
+            source_dir=src,
+            workspace_name="Personal",
+            mode="execute",
+            make_backup=False,
+        )
+        assert report.status == "succeeded"
+        return client
+
+    def test_home_shows_people_count_and_birthdays(self, populated):
+        html = populated.get("/").text
+        assert ">3<" in html  # people count
+        assert "Dana Whitfield" in html  # upcoming birthday within 30d (07-02)... or overdue list
+
+    def test_people_directory_lists_and_flags_shared_names(self, populated):
+        html = populated.get("/people").text
+        assert "P0001" in html and "P0002" in html
+        assert "shared name" in html  # two "Dana Whitfield" records
+
+    def test_people_search_by_alias_and_company(self, populated):
+        assert "P0001" in populated.get("/people?q=Dee").text  # alias
+        assert "P0001" in populated.get("/people?q=nimbus").text  # company
+        assert "P0001" not in populated.get("/people?q=zzzznope").text
+
+    def test_archived_filter(self, populated):
+        active = populated.get("/people?show=active").text
+        assert "P0009" not in active
+        archived = populated.get("/people?show=archived").text
+        assert "P0009" in archived
+
+    def test_person_page_shows_facts_relationships_interactions_revisions(self, populated):
+        html = populated.get("/people/P0003").text
+        assert "Marco Reyes" in html
+        assert "Worked with Dana at Nimbus Robotics" in html  # fact
+        assert "Dana Whitfield (P0001)" in html  # resolved relationship
+        assert "Priya Anand (P0009)" in html  # relationship to archived person
+        assert "Asked for a contractor recommendation" in html  # interaction
+
+    def test_person_markdown_export_matches_canonical(self, populated, session_maker):
+        from montauk.db.mapping import person_to_domain
+        from montauk.exporters.markdown import person_to_markdown
+
+        r = populated.get("/export/person/P0001.md")
+        assert r.status_code == 200
+        assert r.headers["content-disposition"].endswith('"P0001.md"')
+        with session_maker() as s:
+            ws = get_or_create_workspace(s, "Personal")
+            repo = PeopleRepository(WorkspaceScope(s, ws.id, Actor("owner")))
+            expected = person_to_markdown(person_to_domain(repo.require("P0001")))
+        assert r.text == expected
+
+    def test_person_json_export(self, populated):
+        r = populated.get("/export/person/P0003.json")
+        assert r.status_code == 200 and r.json()["name"] == "Marco Reyes"
+
+    def test_workspace_export_excludes_secrets(self, populated):
+        payload = populated.get("/export/workspace.json").json()
+        assert {p["name"] for p in payload["people"]["active"]} >= {"Marco Reyes"}
+        blob = str(payload).lower()
+        assert "password" not in blob and "token" not in blob
+
+    def test_archive_and_restore_from_person_page(self, populated):
+        csrf = _csrf(populated, "/people/P0001")
+        populated.post("/people/P0001/archive", data={"_csrf": csrf, "reason": "moved"})
+        assert "P0001" not in populated.get("/people?show=active").text
+        populated.post("/people/P0001/restore", data={"_csrf": csrf})
+        assert "P0001" in populated.get("/people?show=active").text
+        # revision history records both transitions
+        assert "archived_at" in populated.get("/people/P0001").text
+
+    def test_missing_person_is_404_not_500(self, populated):
+        assert populated.get("/people/P9999").status_code == 404
+
+    def test_transcripts_page_shows_degraded_state(self, populated):
+        assert "No inbound connectors" in populated.get("/transcripts").text
+
+
+class TestSettings:
+    @pytest.fixture
+    def logged_in(self, client):
+        _setup_owner(client)
+        return client
+
+    def test_defaults_are_automatic_all_and_human_only(self, logged_in):
+        html = logged_in.get("/settings").text
+        assert "automatic_all" in html and "human_only" in html
+
+    def test_create_and_revoke_agent_credential(self, logged_in):
+        csrf = _csrf(logged_in, "/settings")
+        r = logged_in.post(
+            "/settings/agents",
+            data={"_csrf": csrf, "name": "laptop", "capabilities": ["memory_read", "review_proposals"]},
+        )
+        assert r.status_code == 200
+        import re
+
+        m = re.search(r"class=\"token\">\s*(mtk_[A-Za-z0-9_-]+)", r.text)
+        assert m, "raw token shown once on creation"
+        raw = m.group(1)
+        assert len(raw) > 20 and "laptop" in r.text
+
+        again = logged_in.get("/settings").text
+        assert raw not in again  # full token never shown again
+        assert "laptop" in again  # but the credential is listed
+        assert raw[:12] in again  # only the short prefix
+
+        # revoke it
+        cid_match = re.search(r"/settings/agents/([0-9a-f-]{36})/revoke", again)
+        assert cid_match
+        logged_in.post(f"/settings/agents/{cid_match.group(1)}/revoke", data={"_csrf": csrf})
+        assert "revoked" in logged_in.get("/settings").text
+
+    def test_migration_diagnostics_visible(self, client, session_maker, tmp_path):
+        _setup_owner(client)
+        run_migration(
+            session_maker,
+            source_dir=write_golden(tmp_path / "p1"),
+            workspace_name="Personal",
+            mode="execute",
+            make_backup=False,
+        )
+        html = client.get("/settings").text
+        assert "succeeded" in html
+
+
+class TestWorkspaceIsolationOverHTTP:
+    def test_person_from_another_workspace_is_not_visible(self, client, session_maker, tmp_path):
+        _setup_owner(client)
+        # a second, unrelated workspace with its own person P0001
+        with session_maker() as s:
+            other = get_or_create_workspace(s, "Someone Else")
+            repo = PeopleRepository(WorkspaceScope(s, other.id, Actor("owner")))
+            repo.create(
+                Person(
+                    id="P0001",
+                    name="Not Yours",
+                    facts=[Fact(id="fact-1", category="General Notes", text="secret")],
+                    interactions=[Interaction(id="int-1", date="2024-01-01", summary="secret")],
+                )
+            )
+            s.commit()
+
+        r = client.get("/people/P0001", follow_redirects=False)
+        assert r.status_code == 404
+        assert "Not Yours" not in client.get("/people").text

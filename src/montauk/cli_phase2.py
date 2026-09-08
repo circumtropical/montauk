@@ -154,6 +154,38 @@ def verify(
         raise typer.Exit(code=1)
 
 
+def dashboard(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8817, "--port"),
+    database_url: str | None = DbUrlOption,
+) -> None:
+    """Run the Montauk web dashboard (spec 25). Binds to localhost by
+    default; put a TLS-terminating reverse proxy in front for anything
+    beyond loopback / a private network."""
+    import os
+
+    import uvicorn
+
+    from .db.schema_ops import is_up_to_date
+
+    url = _require_url(database_url)
+    if not is_up_to_date(url):
+        typer.echo("error: schema is not up to date; run `montauk db upgrade` first", err=True)
+        raise typer.Exit(code=1)
+
+    loopback = host in ("127.0.0.1", "::1", "localhost")
+    os.environ["MONTAUK_DATABASE_URL"] = url
+    os.environ["MONTAUK_DASHBOARD_SECURE_COOKIES"] = "0" if loopback else "1"
+    if not loopback:
+        typer.echo(
+            "warning: binding beyond loopback -- serve behind HTTPS so session cookies "
+            "and credentials are not sent in the clear.",
+            err=True,
+        )
+    uvicorn.run("montauk.web.wsgi:app", host=host, port=port)
+
+
 def register(app: typer.Typer) -> None:
     app.add_typer(db_app, name="db")
     app.add_typer(migrate_app, name="migrate")
+    app.command("dashboard")(dashboard)

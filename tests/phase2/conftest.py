@@ -128,3 +128,19 @@ def other_scope(db_session: Session, other_workspace):
     from montauk.db.repositories import Actor, WorkspaceScope
 
     return WorkspaceScope(db_session, other_workspace.id, Actor("owner", "owner@example.com"))
+
+
+@pytest.fixture
+def web_app(session_maker, engine, _truncate):
+    from montauk.services.auth import LoginThrottle
+    from montauk.web.app import create_app
+
+    return create_app(session_maker, throttle=LoginThrottle(max_attempts=5), secure_cookies=False)
+
+
+@pytest.fixture
+def client(web_app):
+    from starlette.testclient import TestClient
+
+    with TestClient(web_app) as c:
+        yield c

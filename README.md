@@ -163,11 +163,45 @@ directory's existing ownership wins, so if it isn't already owned by uid 1000, `
 able to write to it. Either `chown -R 1000:1000` the host directory first, or run the container
 with `--user "$(id -u):$(id -g)"` to match your host user instead.
 
+## Phase 2 (in progress): PostgreSQL canonical store + web dashboard
+
+Phase 2 moves the canonical store from Markdown to PostgreSQL and adds a web
+dashboard. This is being built in increments (see `montauk_phase2_build_and_migration_spec.md`
+and `docs/adr/`). **Landed so far:** the PostgreSQL schema, the Phase 1 → PostgreSQL
+migrator, and a read-focused dashboard.
+
+```bash
+export MONTAUK_DATABASE_URL=postgresql://user:pass@localhost:5432/montauk
+uv run montauk db upgrade                       # create / update the schema
+uv run montauk dashboard                        # http://127.0.0.1:8817  (first visit = setup wizard)
+```
+
+Then, with the dashboard's owner/workspace created, import an existing Phase 1
+deployment:
+
+```bash
+uv run montauk migrate phase2 --source-data-dir ~/.local/share/montauk --workspace "Personal"
+# review the report, then:
+uv run montauk migrate phase2 --source-data-dir ~/.local/share/montauk --workspace "Personal" --execute
+```
+
+The migrator is dry-run by default, backs the Phase 1 tree up by *copying* it
+(the tree and its Git history are never modified), stages the whole import in one
+transaction, preserves every permanent person ID, and verifies each record by
+comparing canonical-Markdown hashes before committing. Malformed Phase 1 files
+block an `--execute` run rather than being skipped.
+
+**Not in this increment:** the source connectors (WhatsApp, Google Messages,
+Gmail, IMAP), the LLM extraction/review pipeline, and encrypted backups. Until
+those land, the Phase 1 stdio/HTTP MCP server (`montauk serve`, below) still runs
+against the Markdown tree unchanged; port it to PostgreSQL is the next increment.
+
 ## Development
 
 ```bash
 uv sync
-uv run pytest
+uv run pytest            # needs Docker (spins a postgres testcontainer) or MONTAUK_TEST_DATABASE_URL
+uv run ruff check . && uv run mypy
 ```
 
 `examples/simpsons/` is a synthetic fixture (recognizable fictional characters, not real people)

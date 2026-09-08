@@ -1,0 +1,107 @@
+:root {
+  --bg: #f7f7f5;
+  --surface: #ffffff;
+  --border: #e2e2dd;
+  --text: #1d1d1b;
+  --muted: #6b6b66;
+  --accent: #2f6f4f;
+  --accent-text: #ffffff;
+  --danger: #a3341f;
+  --warn-bg: #fbf3e0;
+  --warn-border: #e6c98a;
+  --radius: 8px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #16171a;
+    --surface: #1f2024;
+    --border: #34363c;
+    --text: #e9e9e6;
+    --muted: #9a9a94;
+    --accent: #5fae86;
+    --accent-text: #10241a;
+    --danger: #e07a63;
+    --warn-bg: #33291a;
+    --warn-border: #6b5327;
+  }
+}
+
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 15px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+}
+a { color: var(--accent); }
+h1, h2, h3 { line-height: 1.25; margin: 1.2rem 0 0.6rem; }
+h1 { font-size: 1.5rem; }
+h2 { font-size: 1.2rem; }
+h3 { font-size: 1rem; }
+
+.topbar {
+  display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+  padding: 0.7rem 1rem; background: var(--surface); border-bottom: 1px solid var(--border);
+}
+.topbar .brand { font-weight: 700; letter-spacing: 0.02em; }
+.topbar nav { display: flex; gap: 1rem; flex-wrap: wrap; }
+.topbar .spacer { flex: 1; }
+.topbar .muted { color: var(--muted); font-size: 0.9rem; }
+
+main { max-width: 960px; margin: 0 auto; padding: 1.2rem 1rem 4rem; }
+
+.card {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 1rem; margin: 0.8rem 0;
+}
+.grid { display: grid; gap: 0.8rem; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); }
+.stat { text-align: left; }
+.stat .n { font-size: 1.8rem; font-weight: 700; }
+.stat .l { color: var(--muted); font-size: 0.85rem; }
+.stat.degraded .n { color: var(--muted); }
+
+.muted { color: var(--muted); }
+.pill {
+  display: inline-block; padding: 0.05rem 0.5rem; border-radius: 999px;
+  border: 1px solid var(--border); font-size: 0.8rem; color: var(--muted);
+}
+.pill.archived { border-color: var(--warn-border); background: var(--warn-bg); color: var(--text); }
+
+.notice { background: var(--warn-bg); border: 1px solid var(--warn-border); border-radius: var(--radius); padding: 0.7rem 1rem; margin: 0.8rem 0; }
+.error { color: var(--danger); }
+
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 0.5rem 0.6rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+th { color: var(--muted); font-weight: 600; font-size: 0.85rem; }
+.scroll-x { overflow-x: auto; }
+
+form.stack { display: flex; flex-direction: column; gap: 0.7rem; max-width: 26rem; }
+label { display: block; font-size: 0.9rem; color: var(--muted); margin-bottom: 0.2rem; }
+input[type=text], input[type=email], input[type=password], input[type=search], input[type=number], select, textarea {
+  width: 100%; padding: 0.5rem 0.6rem; border: 1px solid var(--border);
+  border-radius: 6px; background: var(--bg); color: var(--text); font: inherit;
+}
+button, .button {
+  display: inline-block; padding: 0.5rem 0.9rem; border-radius: 6px; border: 1px solid var(--accent);
+  background: var(--accent); color: var(--accent-text); font: inherit; cursor: pointer; text-decoration: none;
+}
+button.secondary, .button.secondary { background: transparent; color: var(--text); border-color: var(--border); }
+button.danger, .button.danger { background: transparent; color: var(--danger); border-color: var(--danger); }
+.inline { display: inline; }
+
+.searchbar { display: flex; gap: 0.5rem; flex-wrap: wrap; align-items: end; margin: 0.8rem 0; }
+.searchbar > div { flex: 1 1 12rem; }
+
+.facts h3 { border-bottom: 1px solid var(--border); padding-bottom: 0.2rem; }
+.fact, .interaction { padding: 0.5rem 0; border-bottom: 1px dotted var(--border); }
+.fact .meta, .interaction .meta { font-size: 0.8rem; color: var(--muted); }
+code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+pre { background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 0.8rem; overflow-x: auto; }
+
+.token { word-break: break-all; background: var(--bg); border: 1px solid var(--warn-border); padding: 0.6rem; border-radius: 6px; }
+
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 640px) {
+  .topbar { gap: 0.5rem; }
+  main { padding: 1rem 0.8rem 3rem; }
+}

@@ -1,0 +1,55 @@
+{% extends "base.html" %}
+{% block title %}People &middot; Montauk{% endblock %}
+{% block body %}
+  <h1>People</h1>
+
+  <form method="get" action="/people" class="searchbar">
+    <div>
+      <label for="q">Search name, alias, contact, company, location</label>
+      <input type="search" id="q" name="q" value="{{ q }}" autofocus>
+    </div>
+    <div style="flex:0 0 10rem">
+      <label for="show">Show</label>
+      <select id="show" name="show" onchange="this.form.submit()">
+        <option value="active" {{ 'selected' if show == 'active' }}>Active ({{ active_count }})</option>
+        <option value="archived" {{ 'selected' if show == 'archived' }}>Archived ({{ archived_count }})</option>
+        <option value="all" {{ 'selected' if show == 'all' }}>All</option>
+      </select>
+    </div>
+    <button type="submit">Search</button>
+  </form>
+
+  {% if people %}
+  <div class="scroll-x">
+  <table>
+    <thead><tr><th>ID</th><th>Name</th><th>Company</th><th>Location</th><th></th></tr></thead>
+    <tbody>
+    {% for p in people %}
+      <tr>
+        <td><a href="/people/{{ p.public_id }}">{{ p.public_id }}</a></td>
+        <td>
+          <a href="/people/{{ p.public_id }}">{{ p.name }}</a>
+          {% if p.archived %}<span class="pill archived">archived</span>{% endif %}
+          {% if p.shared_name %}<span class="pill" title="Another record shares this name">shared name</span>{% endif %}
+          {% if p.aliases %}<div class="muted">aka {{ p.aliases|join(', ') }}</div>{% endif %}
+          {% if p.summary %}<div class="muted">{{ p.summary }}</div>{% endif %}
+        </td>
+        <td>{{ p.company or '' }}</td>
+        <td>{{ p.location or '' }}</td>
+        <td><a href="/export/person/{{ p.public_id }}.md">.md</a> &middot;
+            <a href="/export/person/{{ p.public_id }}.json">.json</a></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+  <p>
+    {% if page > 1 %}<a href="?q={{ q }}&show={{ show }}&page={{ page - 1 }}">&larr; Prev</a>{% endif %}
+    {% if has_next %}<a href="?q={{ q }}&show={{ show }}&page={{ page + 1 }}">Next &rarr;</a>{% endif %}
+  </p>
+  {% else %}
+    <p class="muted">
+      {% if q %}No people match &ldquo;{{ q }}&rdquo;.{% else %}No people yet. Import a Phase 1 deployment with <code>montauk migrate phase2</code>.{% endif %}
+    </p>
+  {% endif %}
+{% endblock %}

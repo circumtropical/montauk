@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}{{ p.name }} &middot; Montauk{% endblock %}
+{% block body %}
+  <p class="muted"><a href="/people">&larr; People</a></p>
+  <h1>{{ p.name }}
+    {% if archived %}<span class="pill archived">archived</span>{% endif %}
+  </h1>
+  <p class="muted">{{ p.id }}{% if p.aliases %} &middot; aka {{ p.aliases|join(', ') }}{% endif %}</p>
+
+  <div class="card">
+    <h2>Overview</h2>
+    {% if p.summary %}<p>{{ p.summary }}</p>{% endif %}
+    <table>
+      {% if p.birthday %}<tr><th>Birthday</th><td>{{ p.birthday.to_string() }}</td></tr>{% endif %}
+      {% if p.company %}<tr><th>Company</th><td>{{ p.company }}</td></tr>{% endif %}
+      {% if p.job_title %}<tr><th>Job title</th><td>{{ p.job_title }}</td></tr>{% endif %}
+      {% if p.location %}<tr><th>Location</th><td>{{ p.location }}</td></tr>{% endif %}
+      {% if p.desired_contact_cadence_days %}<tr><th>Contact cadence</th><td>every {{ p.desired_contact_cadence_days }} days</td></tr>{% endif %}
+      {% if contact.emails %}<tr><th>Email</th><td>{{ contact.emails|join(', ') }}</td></tr>{% endif %}
+      {% if contact.phones %}<tr><th>Phone</th><td>{{ contact.phones|join(', ') }}</td></tr>{% endif %}
+      {% if contact.address %}<tr><th>Address</th><td>{{ contact.address }}</td></tr>{% endif %}
+      {% for k, v in contact.messaging.items() %}<tr><th>{{ k }}</th><td>{{ v }}</td></tr>{% endfor %}
+    </table>
+    <p style="margin-top:0.8rem">
+      <a class="button secondary" href="/export/person/{{ p.id }}.md">Export .md</a>
+      <a class="button secondary" href="/export/person/{{ p.id }}.json">Export .json</a>
+    </p>
+  </div>
+
+  <div class="card facts">
+    <h2>Facts</h2>
+    {% for category in categories %}
+      {% set items = facts_by_category[category] %}
+      <h3>{{ category }}</h3>
+      {% if items %}
+        {% for f in items %}
+        <div class="fact">
+          <div>{{ f.text }}</div>
+          <div class="meta">{{ f.id }}{% if f.date %} &middot; {{ f.date.to_string() }}{% endif %}{% if f.confidence and f.confidence.value != 'high' %} &middot; {{ f.confidence.value }} confidence{% endif %}
+            {% for s in f.sources %} &middot; source: {{ s.type }}/{{ s.id }}{% endfor %}</div>
+        </div>
+        {% endfor %}
+      {% else %}<p class="muted">&mdash;</p>{% endif %}
+    {% endfor %}
+  </div>
+
+  <div class="card">
+    <h2>Relationships</h2>
+    {% if relationships %}
+      {% for f in relationships %}
+      <div class="fact">
+        <div>{{ f.text }}</div>
+        <div class="meta">{{ f.id }} &middot; {{ f.category }} &rarr;
+          {% if rel_display.get(f.related_person_id) %}
+            <a href="/people/{{ f.related_person_id }}">{{ rel_display[f.related_person_id] }} ({{ f.related_person_id }})</a>
+          {% else %}
+            <span title="referenced person not found">{{ f.related_person_id }} (missing)</span>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    {% else %}<p class="muted">No explicit relationships recorded.</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Interactions</h2>
+    {% if interactions %}
+      {% for i in interactions %}
+      <div class="interaction">
+        <div>{{ i.summary or '(no summary)' }}</div>
+        <div class="meta">{{ i.id }} &middot; {{ i.date.to_string() }}{% if i.channel %} &middot; {{ i.channel }}{% endif %}{% if i.connection_level %} &middot; level {{ i.connection_level }}{% endif %}</div>
+      </div>
+      {% endfor %}
+    {% else %}<p class="muted">No interactions recorded.</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Connected identities &amp; transcripts</h2>
+    <p class="muted">No connectors are configured in this build. Source identities, threads, and transcript search arrive with the connector increment.</p>
+  </div>
+
+  <div class="card">
+    <h2>Pending proposals</h2>
+    <p class="muted">Automatic extraction is not configured in this build.</p>
+  </div>
+
+  <div class="card">
+    <h2>Revision history</h2>
+    {% if revisions %}
+    <div class="scroll-x">
+    <table>
+      <thead><tr><th>When</th><th>Field</th><th>Old</th><th>New</th><th>Actor</th><th>Reason</th></tr></thead>
+      <tbody>
+      {% for r in revisions %}
+        <tr>
+          <td>{{ r.occurred_at|humantime }}</td>
+          <td>{{ r.entity_type }}.{{ r.field }}</td>
+          <td>{{ r.old_value if r.old_value is not none else '' }}</td>
+          <td>{{ r.new_value if r.new_value is not none else '' }}</td>
+          <td>{{ r.actor_type }}{% if r.actor_id %} ({{ r.actor_id }}){% endif %}</td>
+          <td>{{ r.reason or '' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}<p class="muted">No changes recorded since migration.</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Lifecycle</h2>
+    {% if archived %}
+      <form method="post" action="/people/{{ p.id }}/restore" class="inline">
+        <input type="hidden" name="_csrf" value="{{ csrf }}">
+        <button type="submit">Restore to active</button>
+      </form>
+    {% else %}
+      <form method="post" action="/people/{{ p.id }}/archive" class="stack">
+        <input type="hidden" name="_csrf" value="{{ csrf }}">
+        <div><label for="reason">Reason (optional)</label>
+          <input type="text" id="reason" name="reason"></div>
+        <button type="submit" class="danger">Archive this person</button>
+      </form>
+    {% endif %}
+  </div>
+{% endblock %}

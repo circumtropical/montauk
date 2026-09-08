@@ -1,0 +1,118 @@
+{% extends "base.html" %}
+{% block title %}Settings &middot; Montauk{% endblock %}
+{% block body %}
+  <h1>Settings</h1>
+
+  <div class="card">
+    <h2>Workspace</h2>
+    <table>
+      <tr><th>Name</th><td>{{ workspace.name }}</td></tr>
+      <tr><th>Slug</th><td>{{ workspace.slug }}</td></tr>
+      <tr><th>Deployment</th><td>{{ workspace.deployment_profile or 'private' }}</td></tr>
+      <tr><th>Public URL</th><td>{{ workspace.public_url or '—' }}</td></tr>
+    </table>
+  </div>
+
+  <div class="card">
+    <h2>Review policy</h2>
+    <table>
+      <tr><th>Review threshold</th><td>{{ ws_settings.review_threshold }}</td></tr>
+      <tr><th>Allowed reviewers</th><td>{{ ws_settings.allowed_reviewers }}</td></tr>
+      <tr><th>Timezone</th><td>{{ ws_settings.timezone }}</td></tr>
+      <tr><th>Daily extraction time</th><td>{{ ws_settings.daily_extraction_time }}</td></tr>
+    </table>
+    <p class="muted">Editing review/extraction policy is enabled once extraction lands.</p>
+  </div>
+
+  <div class="card">
+    <h2>Connectors &amp; model provider</h2>
+    <p class="muted">Not available in this build. Inbound connectors (WhatsApp, Google Messages,
+      Gmail, IMAP) and the LLM extraction/summarization provider are configured here in a later increment.</p>
+  </div>
+
+  <div class="card">
+    <h2>Agent credentials (manual tokens)</h2>
+    {% if new_token %}
+      <div class="notice">
+        <p>New token &mdash; copy it now, it is not shown again:</p>
+        <p class="token">{{ new_token }}</p>
+      </div>
+    {% endif %}
+    {% if credentials %}
+    <table>
+      <thead><tr><th>Name</th><th>Prefix</th><th>Capabilities</th><th>Created</th><th>Status</th><th></th></tr></thead>
+      <tbody>
+      {% for c in credentials %}
+        <tr>
+          <td>{{ c.name }}</td>
+          <td><code>{{ c.token_prefix }}…</code></td>
+          <td>{{ c.capabilities|join(', ') }}</td>
+          <td>{{ c.created_at|humantime }}</td>
+          <td>{% if c.revoked_at %}<span class="muted">revoked</span>{% else %}active{% endif %}</td>
+          <td>
+            {% if not c.revoked_at %}
+            <form method="post" action="/settings/agents/{{ c.id }}/revoke" class="inline">
+              <input type="hidden" name="_csrf" value="{{ csrf }}">
+              <button type="submit" class="danger">Revoke</button>
+            </form>
+            {% endif %}
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    {% else %}<p class="muted">No agent credentials yet.</p>{% endif %}
+
+    <form method="post" action="/settings/agents" class="stack" style="margin-top:1rem">
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+      <div><label for="name">Credential name</label>
+        <input type="text" id="name" name="name" placeholder="e.g. laptop-assistant" required></div>
+      <fieldset style="border:1px solid var(--border);border-radius:6px;padding:0.6rem">
+        <legend class="muted">Capabilities</legend>
+        {% for cap in capabilities %}
+          <label style="display:flex;gap:0.4rem;align-items:center;color:var(--text)">
+            <input type="checkbox" name="capabilities" value="{{ cap }}" style="width:auto"
+              {{ 'checked' if cap in default_capabilities }}>
+            {{ cap }}
+          </label>
+        {% endfor %}
+      </fieldset>
+      <button type="submit">Create credential</button>
+    </form>
+  </div>
+
+  <div class="card">
+    <h2>Migration diagnostics</h2>
+    {% if migrations %}
+    <div class="scroll-x">
+    <table>
+      <thead><tr><th>Started</th><th>Mode</th><th>Status</th><th>Counts</th><th>Hash mismatches</th><th>Backup</th></tr></thead>
+      <tbody>
+      {% for m in migrations %}
+        <tr>
+          <td>{{ m.started_at|humantime }}</td>
+          <td>{{ m.mode }}</td>
+          <td>{{ m.status }}</td>
+          <td>{{ (m.report or {}).get('counts') }}</td>
+          <td>{{ ((m.report or {}).get('hash_mismatches') or [])|length }}</td>
+          <td>{{ m.backup_ref or '—' }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    {% else %}<p class="muted">No migration runs recorded for this workspace.</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Exports</h2>
+    <p><a class="button secondary" href="/export/workspace.json">Download workspace export (.json)</a></p>
+    <p class="muted">People, relationships, interactions, provenance, and revision history. Excludes secrets.</p>
+  </div>
+
+  <div class="card">
+    <h2>Backups</h2>
+    <p class="muted">Built-in encrypted PostgreSQL backups are configured here in a later increment.
+      For now, use your platform's <code>pg_dump</code> schedule.</p>
+  </div>
+{% endblock %}

@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% block title %}Set up Montauk{% endblock %}
+{% block body %}
+  <h1>Welcome to Montauk</h1>
+  <p class="muted">
+    This deployment has no owner yet. Create your account and workspace to begin.
+    Connectors, LLM extraction, and backups are configured later from Settings.
+  </p>
+  {% set v = values or {} %}
+  <form method="post" action="/setup" class="stack">
+    <h2>1. Owner account</h2>
+    <div>
+      <label for="email">Email</label>
+      <input type="email" id="email" name="email" value="{{ v.email or '' }}" autocomplete="username" required autofocus>
+    </div>
+    <div>
+      <label for="password">Password (10+ characters)</label>
+      <input type="password" id="password" name="password" autocomplete="new-password" minlength="10" required>
+    </div>
+    <div>
+      <label for="password_confirm">Confirm password</label>
+      <input type="password" id="password_confirm" name="password_confirm" autocomplete="new-password" required>
+    </div>
+
+    <h2>2. Workspace</h2>
+    <div>
+      <label for="workspace_name">Workspace name</label>
+      <input type="text" id="workspace_name" name="workspace_name" value="{{ v.workspace_name or '' }}" placeholder="e.g. Personal" required>
+    </div>
+
+    <h2>3. Deployment</h2>
+    <div>
+      <label for="deployment_profile">Profile</label>
+      <select id="deployment_profile" name="deployment_profile">
+        <option value="private" {{ 'selected' if v.deployment_profile != 'public' }}>Private (localhost / LAN / Tailscale)</option>
+        <option value="public" {{ 'selected' if v.deployment_profile == 'public' }}>Public (HTTPS reverse proxy)</option>
+      </select>
+    </div>
+    <div>
+      <label for="public_url">Public / base URL (required for a public deployment)</label>
+      <input type="text" id="public_url" name="public_url" value="{{ v.public_url or '' }}" placeholder="https://montauk.example.com">
+    </div>
+
+    <button type="submit">Create owner &amp; workspace</button>
+  </form>
+{% endblock %}

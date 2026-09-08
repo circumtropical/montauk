@@ -1,0 +1,53 @@
+{% extends "base.html" %}
+{% block title %}Home &middot; Montauk{% endblock %}
+{% block body %}
+  <h1>Overview</h1>
+
+  <div class="grid">
+    <div class="card stat"><div class="n">{{ people_count }}</div><div class="l">people</div>
+      <div class="muted">{{ archived_count }} archived</div></div>
+    <div class="card stat"><div class="n">{{ birthdays|length }}</div><div class="l">birthdays in 30 days</div></div>
+    <div class="card stat"><div class="n">{{ overdue|length }}</div><div class="l">overdue contacts</div></div>
+    {% for label, why in deferred.items() %}
+    <div class="card stat degraded"><div class="n">&mdash;</div>
+      <div class="l">{{ label.replace('_', ' ') }}</div>
+      <div class="muted">{{ why }}</div></div>
+    {% endfor %}
+  </div>
+
+  {% if last_migration %}
+  <div class="card">
+    <h2>Last migration</h2>
+    <p>Phase 1 &rarr; PostgreSQL: <strong>{{ last_migration.status }}</strong>
+      ({{ last_migration.mode }}) &middot; {{ last_migration.started_at|humantime }}</p>
+    {% if last_migration.report and last_migration.report.hash_mismatches %}
+      <p class="error">{{ last_migration.report.hash_mismatches|length }} hash mismatch(es) &mdash; see Settings.</p>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <h2>Upcoming birthdays</h2>
+    {% if birthdays %}
+      <table><thead><tr><th>Person</th><th>Date</th><th>In</th></tr></thead><tbody>
+      {% for b in birthdays %}
+        <tr><td><a href="/people/{{ b.person.public_id }}">{{ b.person.name }}</a></td>
+          <td>{{ b.on }}</td><td>{{ b.days }} day{{ 's' if b.days != 1 }}</td></tr>
+      {% endfor %}
+      </tbody></table>
+    {% else %}<p class="muted">Nothing in the next 30 days.</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2>Overdue contacts</h2>
+    {% if overdue %}
+      <table><thead><tr><th>Person</th><th>Cadence</th><th>Last contact</th></tr></thead><tbody>
+      {% for o in overdue %}
+        <tr><td><a href="/people/{{ o.public_id }}">{{ o.name }}</a></td>
+          <td>{{ o.cadence_days }}d</td>
+          <td>{% if o.last_interaction_on %}{{ o.last_interaction_on }} ({{ o.days_since }}d ago){% else %}<span class="muted">never contacted</span>{% endif %}</td></tr>
+      {% endfor %}
+      </tbody></table>
+    {% else %}<p class="muted">Everyone is within their desired cadence.</p>{% endif %}
+  </div>
+{% endblock %}

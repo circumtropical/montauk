@@ -42,6 +42,25 @@ class TestFirstRun:
         assert ws.settings.review_threshold == "automatic_all"
         assert ws.settings.allowed_reviewers == "human_only"
 
+    def test_first_run_adopts_a_workspace_left_by_a_pre_setup_migration(self, db_session):
+        from montauk.db.repositories import Actor, PeopleRepository, WorkspaceScope
+        from montauk.models import Person
+        from montauk.services.workspace import get_or_create_workspace
+
+        ws = get_or_create_workspace(db_session, "Imported")
+        PeopleRepository(WorkspaceScope(db_session, ws.id, Actor("migration"))).create(
+            Person(id="P0001", name="Already Here"), record_revision=False
+        )
+        db_session.flush()
+
+        user, adopted = bootstrap_deployment(
+            db_session, email="o@example.com", password="pw-1234567890", workspace_name="Mine"
+        )
+        db_session.flush()
+        assert adopted.id == ws.id
+        assert adopted.name == "Mine"
+        assert PeopleRepository(WorkspaceScope(db_session, adopted.id, Actor("owner"))).count() == 1
+
     def test_second_first_run_cannot_seize_ownership(self, db_session):
         bootstrap_deployment(db_session, email="a@example.com", password="pw-aaaaaaaaaa", workspace_name="WS")
         db_session.flush()

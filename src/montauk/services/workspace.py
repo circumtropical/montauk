@@ -58,18 +58,34 @@ def bootstrap_deployment(
     session.add(user)
     session.flush()
 
-    workspace = orm.Workspace(
-        slug=_unique_slug(session, slugify_workspace(workspace_name)),
-        name=workspace_name.strip(),
-        public_url=public_url,
-        deployment_profile=deployment_profile,
-    )
-    session.add(workspace)
-    session.flush()
+    # If a migration ran before first-run, exactly one member-less workspace
+    # already exists -- adopt it (and its imported people) rather than
+    # stranding the data in an unreachable workspace.
+    orphans = list(session.execute(select(orm.Workspace)).scalars())
+    adopt = orphans[0] if len(orphans) == 1 else None
+
+    if adopt is not None:
+        workspace = adopt
+        workspace.name = workspace_name.strip()
+        if public_url:
+            workspace.public_url = public_url
+        if deployment_profile:
+            workspace.deployment_profile = deployment_profile
+    else:
+        workspace = orm.Workspace(
+            slug=_unique_slug(session, slugify_workspace(workspace_name)),
+            name=workspace_name.strip(),
+            public_url=public_url,
+            deployment_profile=deployment_profile,
+        )
+        session.add(workspace)
+        session.flush()
 
     session.add(orm.WorkspaceMembership(workspace_id=workspace.id, user_id=user.id, role="owner"))
-    session.add(orm.WorkspaceSettings(workspace_id=workspace.id))
-    session.add(orm.PersonIdSequence(workspace_id=workspace.id, last_allocated=0))
+    if session.get(orm.WorkspaceSettings, workspace.id) is None:
+        session.add(orm.WorkspaceSettings(workspace_id=workspace.id))
+    if session.get(orm.PersonIdSequence, workspace.id) is None:
+        session.add(orm.PersonIdSequence(workspace_id=workspace.id, last_allocated=0))
     session.flush()
     return user, workspace
 
