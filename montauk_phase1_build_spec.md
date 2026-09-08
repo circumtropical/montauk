@@ -6,7 +6,14 @@
 
 Specification date: August 30, 2026
 
-**Status: Ready for implementation**
+**Status: Phase 1 built. This document has been revised retroactively (September 2, 2026) to describe what was actually implemented, as the starting point for a Phase 2 specification.**
+
+> **As-built note.** The original document was a pre-implementation spec. During
+> the build, a number of details were decided or changed. Those decisions are now
+> folded into the relevant sections below; where an implementation choice differs
+> from the original intent, or where a listed Phase 1 requirement was ultimately
+> deferred, the text says so explicitly. Section 40 ("Build Decisions and
+> Deviations") collects the notable ones in one place.
 
 ## 1. Executive Summary
 
@@ -101,37 +108,67 @@ Architectural invariant: Markdown is authoritative. SQLite and vector data are d
 
 - A single atomic batch may modify one person only. Multi-person events are represented by separate serialized calls.
 
+**As built.** A deployment is created with `montauk init --data-dir PATH`, which
+scaffolds the data directory and a **local** private git repository for the
+canonical Markdown (branch `main`, initial commit, derived/secret paths
+gitignored). The operator wires up their own private remote and push cadence;
+Montauk never adds a remote or pushes. The server is then run with
+`montauk serve` (stdio for a single local agent host, or authenticated
+streamable-HTTP for multiple remote agents).
+
 ## 6. Repository Layout
 
 ```text
-montauk-mcp/
+montauk-mcp/                         # public source repository (MIT)
   config/
     config.example.yaml
-  data/                       # deployment data; normally gitignored in public source repo
-    people/
-      P0001.md
-      P0002.md
-      P0003.md
-    archive/
-      ...
-    person-id-sequence.json   # canonical, git-tracked person-ID high-water mark
-    index/
-      relationships.sqlite
-      vectors/                # implementation-specific derived vector data
-    validation-report.json
+  data/                              # wholesale-gitignored in the source repo
   examples/
-    simpsons/
-      people/
-      archive/
-  src/
-    montauk/
+    simpsons/                        # synthetic fixture: identity/index/edge-case coverage
+      people/  archive/  person-id-sequence.json
+    dating/                          # synthetic fixture: prepare_person_context coverage
+      people/  person-id-sequence.json
+  src/montauk/
   tests/
+  .github/workflows/ci.yml
   pyproject.toml
+  uv.lock
   Dockerfile
+  LICENSE
   README.md
+
+<data_dir>/                          # a deployment's data directory, anywhere on disk
+  people/
+    P0001.md
+    P0002.md
+  archive/
+    P0009.md
+  person-id-sequence.json            # canonical, git-tracked person-ID high-water mark
+  config.yaml                        # written by `montauk init` (non-secret settings)
+  README.md                          # written by `montauk init` (private-repo notice)
+  .gitignore                         # written by `montauk init` / git-snapshot
+  index/
+    relationships.sqlite             # derived relational index
+    vectors/
+      vectors.npy                    # derived: float32 embedding matrix
+      chunks.sqlite                  # derived: chunk metadata + fingerprints
+  auth/
+    credentials.sqlite               # agent credentials (SECRET; never derived, never git-tracked)
+  logs/
+    montauk.log                      # rotating application log
+  validation-report.json             # regenerated every startup / validate
+  .montauk.lock                      # advisory write lock
+  id-migration-map.json              # only present during/after `montauk migrate-ids`
 ```
 
-A real deployment may place its data directory anywhere via configuration. The public source repository should not encourage users to commit private relationship data to a public remote.
+A deployment's data directory is chosen via `--data-dir` or the config's `data_dir`
+and normally lives **outside** the source checkout (e.g. `~/.local/share/montauk`,
+`/var/lib/montauk`, or a Docker volume). `montauk init` scaffolds it, including a
+**local** git repository on branch `main` whose `.gitignore` excludes `index/`,
+`auth/`, `logs/`, `validation-report.json`, `.montauk.lock`, and the migration
+map/backups. The source repo's own top-level `data/` is wholesale-gitignored so
+private relationship data is never committed to a public remote. Montauk never
+adds a git remote and never pushes (section 29).
 
 ## 7. Person Identifiers
 
@@ -165,7 +202,19 @@ P0003
 
 ## 8. Canonical Markdown Person Schema
 
-The exact serialization may evolve during implementation, but Phase 1 should preserve the following semantic schema. YAML front matter is recommended for compact structured fields; narrative sections remain ordinary Markdown.
+**As built.** The canonical file is YAML front matter followed by the six fixed
+`## ` category headings and a `## Interactions` heading, in that fixed order. All
+seven headings are always emitted, even when empty. Each category heading's body
+is a YAML list of fact mappings; under `## Interactions`, each interaction is a
+`### int-N` sub-heading whose body is a YAML list of single-key field mappings.
+The `# Name` title line is regenerated from `name` on every write. The server
+never edits a file in place: it rebuilds the whole file canonically on each write,
+with facts and interactions sorted by their numeric local ID, so an unchanged
+`Person` always re-serializes byte-identically (this keeps content-hash index
+reconciliation and Git diffs stable). Front-matter `contact` is a nested mapping
+(`emails`, `phones`, `address`, `messaging`). The following illustrates the
+schema; the real serializer's spacing/quoting is deterministic but not identical
+to this hand-written sample.
 
 ```text
 ---
@@ -422,6 +471,15 @@ Recommended indexed data:
 
 Do not persist 'days since last interaction' as canonical index state. Compute it from last_interaction_date at query time so it never goes stale.
 
+**As built.** One `people` table keyed by `person_id` (name, `aliases_json`,
+birthday month/day/year, location, company, job_title, cadence, summary,
+`contact_*_json`, `last_interaction_at`, `file_path`, `content_hash`,
+`updated_at`) plus an `index_meta` key/value table (`schema_version`,
+`last_reconciliation_at`). `last_interaction_at` stores the *latest* calendar date
+consistent with a partial-precision interaction date. WAL journal mode; single
+writer, serialized through the write queue. `days_since_last_interaction` is
+computed at query time and is not a column, as specified.
+
 ## 18. Startup Reconciliation
 
 1. Scan active Markdown files in people/.
@@ -464,6 +522,21 @@ Semantic search is a Phase 1 feature because vague identity recall is a core use
 
 - Similarity threshold and result limit use server defaults in Phase 1; they may be configurable in YAML for administrators.
 
+**As built.** Vector storage is brute-force cosine similarity over an in-memory
+`float32` numpy matrix persisted to `index/vectors/vectors.npy`, with parallel
+chunk metadata (id, person_id, chunk type, local id, chunk position, text) in
+`index/vectors/chunks.sqlite`. No approximate-nearest-neighbour library (FAISS,
+hnswlib, ...) is used: brute force is fast enough at the expected scale (hundreds
+to low thousands of chunks for one person's-worth of relationships). `chunks.sqlite`
+also holds `vector_meta` (schema version, embedding model name, dimension,
+chunking-config fingerprint) and `person_meta` (per-person canonical content hash)
+for drift detection. `search_people` runs the SQLite substring/alias/company/
+location scan **and**, when the semantic index is present and current, the vector
+search, then merges candidates and attaches per-match evidence lines. The default
+`search.similarity_threshold` is **0.35**, empirically calibrated for the default
+local model (see section 20) — the original illustrative `0.55` dropped genuinely
+relevant matches for this model.
+
 ### 19.1 Indexable units and interaction chunking
 
 The derived index holds one entry per semantic unit: the current person summary, each individual fact, each relationship (a fact carrying a `related_person_id` -- indexed as its own fact chunk), and each interaction summary. A long interaction summary is split at sentence boundaries into overlapping chunks (`interaction_chunk_tokens` / `interaction_chunk_overlap_tokens`); short ones stay whole; facts and the person summary are never split. Every chunk of an interaction references the same canonical `interaction_id` and records its position (`chunk_index` / `chunk_total`). A whole person file is never embedded as one vector.
@@ -490,6 +563,17 @@ class EmbeddingProvider(Protocol):
 - Default should run locally on CPU without requiring an API token.
 
 - The provider interface exposes provider identity, model identity, dimension, batch embedding, and (implicitly) failure reporting.
+
+**As built.** The `EmbeddingProvider` Protocol is `dimension: int` plus
+`embed(list[str]) -> list[list[float]]`. The one shipped implementation,
+`LocalEmbeddingProvider` (`provider = "local"`), runs
+**`sentence-transformers/all-MiniLM-L6-v2`** (384-dim) via **`fastembed`**
+(ONNX Runtime, no PyTorch, no API token). Model weights are fetched from
+Hugging Face Hub once and cached on disk; the Dockerfile pre-bakes them into the
+image (`FASTEMBED_CACHE_PATH=/opt/fastembed_cache`) so a fresh container needs no
+network on first run. `EmbeddingConfig.provider` is currently typed as
+`Literal["local"]` — no hosted adapter ships, and adding one is Phase 2 work; the
+config schema, not just the code, would need to change to select it.
 
 - **Privacy:** the default installation sends no person records, facts, relationships, or interactions to a hosted provider. A hosted provider may be used only after an explicit provider selection in config **and** explicit enablement -- finding an API key in the environment is not authorization. There is no silent local-to-hosted fallback. Raw personal text is not logged to diagnose embedding requests; credentials never appear in person files, shareable indexes, logs, or tool output. If the configured semantic provider is unavailable, retrieval continues lexically and reports `semantic_available: false` with a short reason; the request is not failed.
 
@@ -528,6 +612,30 @@ The MCP API must support both narrow and broad reads.
 - **Lexical-only fallback** is a supported operating mode (no provider configured, model won't load, provider disabled/unavailable, index rebuilding): retrieval still works and `semantic_available` is `false` with a short structured reason.
 
 This first implementation uses hybrid retrieval returning canonical content substantially verbatim. LLM summarization / generative compression and autonomous memory curation are explicit non-goals; the `prepare_person_context` contract is designed so they can be added later without changing it.
+
+**As built** (`person_context.py`, a pure/deterministic/independently-tested module):
+
+- **Purpose analysis** is regex/keyword heuristics, no LLM. It extracts query
+  terms (stopworded, with the subject's own name dropped), quoted phrases, and
+  proper nouns, and sets boolean intents: `is_temporal`, `wants_events`,
+  `wants_present_state`, `wants_preferences`, `is_advisory`, `is_briefing`. These
+  drive per-unit ranking boosts and the selection gate.
+- **Lexical** ranking is BM25 over an **ephemeral in-memory SQLite FTS5** table
+  built per call (`porter unicode61` tokenizer); if the host SQLite lacks FTS5 it
+  falls back to normalized term-overlap scoring. Always available, never stale.
+- **Semantic** ranking is per-person vector search (`search_person`), never
+  crossing to other people. Scores are min-max-scaled within the person's own
+  top matches, not treated as calibrated probabilities.
+- **Ranking weights** live in a `RankWeights` dataclass (a separate, testable
+  component). Selection uses a per-detail-level relevance floor (fraction of the
+  top unit's score) and a soft item cap; `comprehensive`/briefing keep everything
+  materially relevant and round-robin-diversify across evidence buckets.
+- **Token budget** uses the conservative over-estimating heuristic in `tokens.py`
+  (max of a word-based and char-based estimate); Montauk bundles no real
+  tokenizer.
+- The `temporal` block is emitted only for temporal purposes or `comprehensive`;
+  elapsed days are computed only when the supporting interaction date is
+  full-precision.
 
 ## 22. Identity Resolution
 
@@ -619,6 +727,25 @@ get_archived_person(person_id)
 
 Read-only credentials must be prevented from invoking mutation tools server-side.
 
+**As built.** The registered tool names match the list above exactly, in three
+groups (`register_core_tools`, `register_batch_tools`, `register_ops_tools`), with
+these notes:
+
+- `update_person_batch(person_id, operations=[...])` accepts a discriminated union
+  of op types: `add_fact`, `update_fact`, `remove_fact`, `record_interaction`,
+  `update_contact_details`, `update_summary`, `set_name`, `set_birthday`,
+  `set_contact_cadence`. It does **not** include `update_interaction`,
+  `remove_interaction`, or `archive_person` — those stay single-purpose tools.
+- `get_interactions(person_id, limit=None)` returns interactions most-recent-first;
+  `limit` takes the N most recent.
+- There is no un-archive / restore tool. Restoring an archived person is a manual
+  file move plus a restart or `rebuild-index` (section 16).
+- `search_people` does not raise `AMBIGUOUS`; it returns the candidate list and
+  leaves disambiguation to the caller (section 22).
+- MCP prompts (section 25.1) are not implemented — not needed for Phase 1.
+- MCP resources are not used; `get_full_record` / `get_archived_person` return the
+  canonical Markdown as a tool-result string.
+
 ## 25. Agent Integration Contract
 
 The MCP interface is not only a function endpoint; it is the discoverable contract by which an arbitrary compatible assistant learns how to use the Montauk server. Phase 1 should explicitly define both server-level usage instructions and high-quality per-tool descriptions/schemas.
@@ -626,6 +753,24 @@ The MCP interface is not only a function endpoint; it is the discoverable contra
 ### 25.1 Protocol Discovery and Instruction Layers
 
 Target MCP protocol revision: 2026-07-28 or newer compatible revisions. In this protocol generation, clients can use server discovery to learn server capabilities and optional natural-language instructions. Tool catalogs remain discoverable independently through the MCP tools interface, including each tool name, description, input schema, and output schema. Implement backward compatibility only where the chosen Python MCP SDK makes it practical; do not design Phase 1 around the older stateful initialization handshake.
+
+**As built.** The server is built on the `mcp` Python SDK, constrained to
+`mcp>=2.1,<3`, via `MCPServer(name="montauk", instructions=SERVER_INSTRUCTIONS)`
+from `mcp.server.mcpserver`. Tools are registered with the `@server.tool`
+decorator; input/output schemas are derived from the handler's type hints and
+Pydantic models (`tool_types.py`), and pydantic rejects malformed calls before
+handler logic. Two transports are supported:
+
+- **stdio** — `mcp_server.run_stdio_async()`. Exactly one client; its identity is
+  resolved once at startup from `MONTAUK_AGENT_TOKEN` (section 30).
+- **streamable HTTP** — `server.streamable_http_app(...)` mounted under Starlette
+  and served by uvicorn. The MCP endpoint path is **`/mcp`**. Per-request
+  `Authorization: Bearer` headers are read via `Context.headers`.
+
+Server instructions are published through the SDK's `instructions` field; the
+tool catalog (names, descriptions, JSON schemas) is discoverable independently.
+Typed tool errors (`errors.py`) subclass the SDK's `ToolError` and carry a
+machine-parseable `code:` prefix.
 
 - Server instructions: concise global guidance explaining how the Montauk tools fit together and the expected workflow.
 
@@ -790,6 +935,15 @@ Minimum checks:
 
 A malformed manual file must not prevent server startup. Skip it, omit it from indexes, mark health as degraded, and record a specific error.
 
+**As built.** Each `ValidationIssue` has a severity. **Error** severity (excludes
+the person from the valid set, marks the repo degraded): unreadable file, YAML/
+Markdown format error, Pydantic domain-validation error, duplicate active
+`person_id`. **Warning** severity (recorded, never blocks service): a filename
+that no longer matches its front-matter `id`, and a `related_person_id` that does
+not resolve to a known active person (it may legitimately point at an archived
+person). The report is written to `<data_dir>/validation-report.json` on every
+startup and every `validate_repository` / `montauk validate`.
+
 ## 28. Error Reporting and Logs
 
 - Generate a fresh validation-report.json (or equivalent) on every startup.
@@ -822,6 +976,19 @@ Git is an audit/recovery mechanism, not part of the logical database schema.
 
 - Semantically meaningful history remains in current person records; misinformation/edit mistakes are corrected and recoverable through Git if needed.
 
+**As built.** The git repository is **inside the deployment's `data_dir`**, wholly
+separate from the source-code repo (a real `data_dir` is typically outside the
+source tree). `montauk init` / `ensure_git_repo` create it on branch `main` with
+a `.gitignore` excluding `index/`, `auth/`, `logs/`, `validation-report.json`,
+`.montauk.lock`, and the migration map/backups. Only the canonical pathspecs
+(`people/`, `archive/`, `person-id-sequence.json`) are ever staged — never
+`git add -A`. Automated commits use a distinct identity (`Montauk
+<montauk@localhost>`), applied per-invocation with `-c`, so no global git config
+is written. `snapshot_if_changed` checks status scoped to the canonical paths and
+commits at most once; it is idempotent across the in-process
+`DailySnapshotScheduler` (asyncio task, configurable time) and any external cron
+entry landing the same day. Pushing to a remote is entirely the operator's job.
+
 ## 30. Security and Access Control
 
 Security is a Phase 1 requirement because the repository may contain highly sensitive personal information.
@@ -848,16 +1015,54 @@ Security is a Phase 1 requirement because the repository may contain highly sens
 
 - Public repository examples and tests must use synthetic data only.
 
+**As built.**
+
+- **Credential store:** `<data_dir>/auth/credentials.sqlite`, owned exclusively by
+  `auth.CredentialStore` and never touched by the derived-index code or the git
+  snapshot. Tokens are `mtk_<43 url-safe chars>`, stored only as SHA-256 hashes
+  plus a 12-char prefix; the raw token is shown once by `montauk agents create`
+  and is not recoverable. `agent_id` is the name slugified, with a `-2`, `-3`, ...
+  suffix on collision. Roles: `read_only`, `read_write`. Revocation sets
+  `revoked_at` (rows are kept for audit).
+- **stdio auth:** one client, so identity is resolved once at startup from the
+  `MONTAUK_AGENT_TOKEN` environment variable. If unset/invalid, mutation tools
+  fail `PERMISSION_DENIED`; reads still work.
+- **HTTP auth:** two layers. `BearerAuthMiddleware` rejects any request without a
+  valid, non-revoked credential with `401` before MCP dispatch — so an
+  unauthenticated server is never exposed, regardless of bind address. Per-call
+  `_authorize_write` then re-resolves the same header and requires `read_write`
+  for every mutation tool.
+- **Transport encryption:** Montauk speaks **plain HTTP only**. Remote deployments
+  put a TLS-terminating reverse proxy (e.g. Caddy) in front and keep
+  `host: 127.0.0.1`. Binding `0.0.0.0`/`::` logs a plaintext-exposure warning but
+  is not blocked (auth is still enforced).
+- **`transport.public_url`** (added after the initial ID/scoping revisions): the
+  external URL agents connect to through the proxy. When set, its hostname is
+  added to the streamable-HTTP transport's Host-header allowlist so the proxy can
+  `reverse_proxy` without a `header_up Host` rewrite, and DNS-rebinding protection
+  is enabled for that host. When unset, DNS-rebinding protection is disabled for
+  the remote transport (every request is still bearer-authenticated).
+- **Not implemented in Phase 1:** rate-limiting / lockout for repeated failed
+  authentication, and structured per-call audit log lines (agent, tool, status,
+  latency). Logging is deliberately minimal (section 28); only interaction
+  corrections emit an explicit info line. Both are Phase 2 candidates.
+
 ## 31. Configuration
 
-Use YAML for non-secret configuration and environment variables for secrets.
+Use YAML for non-secret configuration and environment variables for secrets. The
+config is a strict Pydantic model (`config.py`, `extra="forbid"` — unknown keys
+are rejected). All sections have defaults; a bare `data_dir` is a valid config.
 
-```text
-data_dir: /var/lib/montauk
+**As built** (full schema, showing defaults):
+
+```yaml
+data_dir: ./data
+
 transport:
-  mode: remote
+  mode: stdio                 # "stdio" | "remote"
   host: 127.0.0.1
   port: 8765
+  # public_url: https://montauk.example.com   # remote-behind-proxy only
 
 git:
   enabled: true
@@ -866,24 +1071,42 @@ git:
 search:
   semantic_enabled: true
   max_candidates: 5
-  similarity_threshold: 0.55
+  similarity_threshold: 0.35  # calibrated for all-MiniLM-L6-v2
+
+retrieval:                    # prepare_person_context (section 21.1)
+  brief_tokens: 750
+  standard_tokens: 2000
+  comprehensive_tokens: 6000
+  min_tokens: 100
+  max_tokens: 8000
+  lexical_enabled: true
+  semantic_enabled: true
+  interaction_chunk_tokens: 120
+  interaction_chunk_overlap_tokens: 24
 
 embedding:
-  provider: local
-  model: <documented-default-model>
+  provider: local             # only "local" is accepted
+  model: sentence-transformers/all-MiniLM-L6-v2
 
 logging:
   level: INFO
   retention_days: 30
 ```
 
-The actual default embedding model and vector backend should be selected during implementation based on current lightweight Python ecosystem quality. The interface, not the model name, is the contract.
+Notes: `search.semantic_enabled` and `retrieval.semantic_enabled` are separate
+toggles (identity search vs. context retrieval). `retrieval` bounds are validated
+for coherence (`min < max`, presets within `[min, max]`, overlap < chunk size).
+`montauk init` writes a starter `config.yaml` with these values into the data
+directory. Secrets are never read from config or environment beyond
+`MONTAUK_AGENT_TOKEN` (stdio bearer token).
 
 ## 32. Administrative CLI
 
 Provide a small administration CLI. It is not a person-record editor.
 
 ```text
+montauk init --data-dir PATH              # scaffold a deployment + private local git repo
+montauk serve                             # run the MCP server (the only long-running command)
 montauk validate
 montauk status
 montauk migrate-ids                       # one-time cutover: name-derived IDs -> generic P0001 IDs
@@ -893,8 +1116,24 @@ montauk git-snapshot
 montauk agents list
 montauk agents create --role read_only --name briefing-agent
 montauk agents revoke <agent-id>
-montauk config-check
+montauk config-check --config PATH
 ```
+
+Every command takes `--data-dir PATH` (quick/direct use) and/or `--config PATH`
+(full YAML config); `--data-dir` overrides the config's `data_dir` when both are
+given. `config-check` requires `--config`. The CLI is built with Typer;
+`montauk` with no args prints help.
+
+**`montauk init`** (added during the build) creates `people/`, `archive/`, the
+`person-id-sequence.json` high-water mark, a starter `config.yaml`, a private-repo
+`README.md`, and a local git repo on branch `main` with an initial commit and a
+`.gitignore` excluding derived/secret paths. It is idempotent and never clobbers
+an existing `config.yaml`. It never adds a git remote or pushes.
+
+**`montauk serve`** loads config + logging, builds the context, runs startup
+reconciliation, resolves the stdio identity (stdio mode), starts the daily git
+snapshot task (if `git.enabled`), and runs the stdio or streamable-HTTP
+transport. `--transport stdio|remote` overrides `transport.mode`.
 
 Person content is changed through MCP operations or direct Markdown editing.
 
@@ -918,15 +1157,44 @@ Person content is changed through MCP operations or direct Markdown editing.
 
 - Pin or constrain dependencies appropriately and document supported Python versions.
 
+**As built.**
+
+- Distribution `montauk-mcp`, import package `montauk` (`src/` layout, hatchling
+  build backend), console script `montauk = "montauk.cli:app"`.
+- **Python 3.11+.** CI (`.github/workflows/ci.yml`) runs the suite on 3.11, 3.12,
+  3.13 with `uv`. The Dockerfile builds on `python:3.14-slim`.
+- Runtime dependencies: `mcp>=2.1,<3`, `pydantic>=2.12`, `pyyaml>=6.0`,
+  `fastembed>=0.8.0`, `numpy>=2.0`, `typer>=0.15`, `starlette>=0.38`,
+  `uvicorn>=0.30` (plus `tzdata` on Windows). Locked in `uv.lock`. Dev group:
+  `pytest`, `pytest-asyncio`.
+- Multi-stage Dockerfile: the builder stage `uv sync`s and pre-downloads the
+  embedding model into `/opt/fastembed_cache`; the runtime stage is slim, runs as
+  non-root uid 1000, and mounts `/data` as a volume. `ENTRYPOINT ["montauk"]`,
+  default `CMD ["serve", "--data-dir", "/data"]`.
+- `config/config.example.yaml` and `.env.example` ship with placeholder values
+  only. `LICENSE` is MIT.
+
 ## 34. Testing Strategy
 
-Ship a static synthetic fixture under examples/simpsons/ using recognizable fictional characters from The Simpsons. The fixture is for software behavior testing, not canon completeness.
+Ship static synthetic fixtures (recognizable fictional characters, never real
+people). **As built there are two:**
+
+- `examples/simpsons/` — identity, indexing, and edge-case coverage: a
+  duplicate-name collision (P0002 / P0003, both "Gil Gunderson"), a
+  missing-birth-year birthday, a person with a contact cadence but no recorded
+  interactions, an archived person (P0009, Frank Grimes), and one deliberately
+  malformed file (P0001, unterminated YAML string) to exercise degraded-health
+  handling.
+- `examples/dating/` — `prepare_person_context` coverage: a dating contact
+  (P0001) and a mutual friend (P0002), with broad / exact-detail / temporal /
+  advisory-shaped questions, an interaction, a `related_person_id` reference, and
+  deliberate gaps (dogs but no dog name; birthday month but no day).
 
 Automated tests should cover:
 
 - Markdown parsing and round-trip preservation.
 
-- Person-ID generation and duplicate-name suffixes.
+- Person-ID generation (generic sequential IDs, concurrency-safe allocation, never reused) and advisory `possible_duplicates` detection for shared names.
 
 - Fixed-category fact operations.
 
@@ -968,27 +1236,41 @@ Automated tests should cover:
 
 Keep the integration contract close to server registration code so server instructions, tool descriptions, and JSON schemas are reviewed and tested as part of the public API.
 
+**As built** (`src/montauk/`):
+
 ```text
-montauk/
-  server.py              # MCP tool/resource registration
-  models.py              # typed domain models
-  markdown_store.py      # canonical read/write
-  schema.py              # validation and categories
-  ids.py                 # person/fact/interaction IDs
-  sqlite_index.py        # derived relational index
-  semantic_index.py      # chunking/vector search
-  embeddings/
-    base.py
-    local.py
-  search.py              # hybrid identity retrieval/ranking
-  write_queue.py         # serialization/atomic operations
-  auth.py                # agent identity and roles
-  reconciliation.py      # startup sync
-  git_snapshot.py        # daily snapshot logic
-  health.py
-  logging_config.py
-  cli.py
+server.py           # MCPServer construction + SERVER_INSTRUCTIONS
+tools_core.py       # identity/read/write tools + MontaukContext + batch tool
+tools_ops.py        # birthday/cadence/archive/validation/health tools
+tool_types.py       # MCP request/response Pydantic models (Appendix A shapes)
+models.py           # typed domain models (Person/Fact/Interaction/Source/ContactInfo)
+markdown_store.py   # canonical parse/serialize, atomic write, PersonIdSequence
+schema.py           # fixed categories + confidence enum
+ids.py              # person/fact/interaction id format + alias normalization
+dates.py            # FlexDate (variable precision) + Birthday
+sqlite_index.py     # derived relational index + reconcile/rebuild
+semantic_index.py   # chunking + numpy vector store + drift detection
+embeddings/base.py  # EmbeddingProvider Protocol
+embeddings/local.py # fastembed local provider (default)
+search is in tools_core.search_people; hybrid context retrieval is person_context.py
+person_context.py   # prepare_person_context: purpose analysis, hybrid ranking, selection
+tokens.py           # conservative token estimate + sentence splitting
+write_queue.py      # asyncio.Lock + fcntl.flock serialized writes
+auth.py             # CredentialStore, bearer-token resolution, role check
+http_app.py         # Starlette wrapper: BearerAuthMiddleware, DNS-rebind settings
+reconciliation.py   # startup scan + validation report (health lives here + tools_ops)
+git_snapshot.py     # data-dir-local git repo + daily snapshot scheduler
+migration.py        # one-time name-derived -> generic ID cutover
+config.py           # strict YAML config model
+bootstrap.py        # assemble MontaukContext + run startup reconciliation
+logging_config.py   # rotating file + stderr handlers
+errors.py           # typed ToolError subclasses
+cli.py              # Typer admin CLI (incl. `init` and `serve`)
 ```
+
+There is no separate `search.py` or `health.py`: identity search is a tool in
+`tools_core.py`, health/validation reporting lives in `reconciliation.py` and
+`tools_ops.py`.
 
 ## 36. Recommended Implementation Sequence
 
@@ -1110,9 +1392,76 @@ montauk/
 
 - Manual editing is a feature, not an escape hatch.
 
+## 40. Build Decisions and Deviations
+
+Consolidated list of the decisions made during implementation that a Phase 2
+spec should build on. Each is expanded in the section noted.
+
+**Committed as spec amendments during the build** (already integrated above):
+
+- **Generic person IDs + mutable names + interaction corrections** (sections 7,
+  9, 12.1, 23, 32; commit `04b4a4e`). Person IDs became opaque sequential
+  `P0001…` with a git-tracked high-water-mark allocator; names are mutable via
+  `update_person_name`; `update_interaction` (incl. `move_to_person_id`) and
+  `remove_interaction` were added; `montauk migrate-ids` was added for the
+  one-time cutover from name-derived IDs.
+- **Record scoping** (section 15.1; commit `f340ff3`). "A source may be about
+  several people; a record is about exactly one." Enforced structurally
+  (one-person batches, `related_person_id` must resolve) and via `RECORD SCOPING`
+  server + tool text.
+- **`prepare_person_context`** (sections 21.1, 24; commit `2de9869`). New
+  purpose-specific hybrid-retrieval evidence-packet tool with `brief` / `standard`
+  / `comprehensive` budgets, and a `retrieval:` config block.
+
+**Decided after those amendments / still only in code until this revision:**
+
+- **`transport.public_url`** and remote DNS-rebinding behavior (sections 30, 31;
+  commit `e6a7a64`).
+- **`montauk init`** deployment + private-git-repo scaffolder, and **`montauk
+  serve`** as the single long-running command (sections 5, 6, 32; commit
+  `b897396`).
+- **Embedding stack:** `fastembed` + `all-MiniLM-L6-v2`; **vector store:**
+  brute-force numpy, no ANN library (sections 19, 20, Appendix C).
+- **`search.similarity_threshold` default lowered 0.55 → 0.35** for the chosen
+  model (sections 19, 31).
+- **Two fixtures** (`examples/simpsons/`, `examples/dating/`) rather than one
+  (section 34).
+- Canonical Markdown is **regenerated whole on every write**; no
+  formatting-preservation layer (section 8, Appendix C).
+- Validation distinguishes **error vs warning** severity; filename/id mismatch
+  and dangling `related_person_id` are warnings that never block startup
+  (section 27).
+
+**Listed as Phase 1 requirements but deferred to Phase 2:**
+
+- **Rate-limiting / lockout** on repeated failed remote authentication
+  (section 30).
+- **Structured per-call audit log lines** (agent, tool, status, latency). Logging
+  is minimal by design; only interaction corrections emit an explicit line
+  (sections 28, 30).
+- **MCP prompts** — not implemented; not needed for autonomous agent use
+  (sections 24, 25.1).
+- **Hosted embedding provider adapter** — the interface exists but
+  `embedding.provider` is `Literal["local"]`; enabling a hosted provider is a
+  config-schema change, not just code (section 20).
+- **`AMBIGUOUS` / `INDEX_DEGRADED` error codes** are defined but never raised;
+  the conditions are reported through return values instead (Appendix A).
+
 ## Appendix A. Recommended API Semantics
 
 Mutation tools should return compact machine-friendly results including person_id, changed object IDs, validation status, and index-update status. `create_person` and `update_person_name` additionally return `possible_duplicates` (other records sharing the name) and `warnings`; the interaction-correction tools return the affected person IDs and, for a re-attribution, the new interaction id on the corrected person. Search tools should return concise evidence, not entire records unless explicitly requested. Errors should be typed and actionable: NOT_FOUND, AMBIGUOUS, VALIDATION_ERROR, PERMISSION_DENIED, ARCHIVED, INDEX_DEGRADED, and INTERNAL_ERROR are reasonable starting classes.
+
+**As built.** All seven codes are defined (`errors.py`), each a `ToolError`
+subclass whose message is prefixed with `CODE: `. Actively raised: `NOT_FOUND`,
+`VALIDATION_ERROR`, `PERMISSION_DENIED`, `ARCHIVED`, and `INTERNAL_ERROR` (the
+base). `AMBIGUOUS` is not raised — `search_people` returns the candidate list
+instead. `INDEX_DEGRADED` is not raised — a derived-index failure surfaces as
+`index_update_status: "degraded"` on the write result (canonical Markdown still
+committed, per Appendix B), and semantic-index staleness surfaces as
+`retrieval.semantic_available: false` with a reason. Mutation results are
+`WriteResult` / `NameUpdateResult` / `InteractionMutationResult` (`tool_types.py`)
+carrying `person_id`, `changed_ids`, `index_update_status`, and — for
+create/rename — `possible_duplicates` and `warnings`.
 
 ## Appendix B. Atomic Markdown Writes
 
@@ -1137,3 +1486,17 @@ For safety, never edit canonical person files in place. Build and validate the c
 - Exact numerical meaning of connection_level remains intentionally undefined.
 
 These are implementation details, not unresolved product requirements. Choose mature, lightweight Python components and keep replaceable interfaces around embedding, vector storage, authentication, and indexing.
+
+**As resolved in Phase 1:**
+
+| Choice | Resolution |
+| --- | --- |
+| MCP SDK / transport | `mcp` package (`>=2.1,<3`), `MCPServer`; `run_stdio_async` and `streamable_http_app` (endpoint `/mcp`) behind Starlette + uvicorn |
+| Local embedding model | `sentence-transformers/all-MiniLM-L6-v2` (384-dim) via `fastembed` (ONNX Runtime, no torch) |
+| Vector index backend | Brute-force cosine over a persisted `float32` numpy matrix + `chunks.sqlite` metadata; no ANN library |
+| Auth mechanism | Opaque bearer tokens (`mtk_…`), SHA-256-hashed in `auth/credentials.sqlite`; HTTP `Authorization` header per request, `MONTAUK_AGENT_TOKEN` env var for stdio |
+| YAML / models / scheduler / logging | `pyyaml`; Pydantic v2; in-process `asyncio` daily-snapshot task; stdlib `logging` with `TimedRotatingFileHandler` |
+| Markdown serialization | Hand-rolled: `pyyaml` front matter + fixed headings; whole-file canonical regeneration on every write (no in-place edit, no formatting-preservation library) |
+| Similarity threshold / result limit | `0.35` / `5` (config: `search.similarity_threshold`, `search.max_candidates`) |
+| `connection_level` semantics | Still intentionally undefined; validated as an integer 1–6 |
+| Relational backend | SQLite (WAL); storage kept behind `SqliteIndex` so Postgres remains a later option |
