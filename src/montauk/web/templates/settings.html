@@ -5,23 +5,76 @@
 
   <div class="card">
     <h2>Workspace</h2>
-    <table>
-      <tr><th>Name</th><td>{{ workspace.name }}</td></tr>
-      <tr><th>Slug</th><td>{{ workspace.slug }}</td></tr>
-      <tr><th>Deployment</th><td>{{ workspace.deployment_profile or 'private' }}</td></tr>
-      <tr><th>Public URL</th><td>{{ workspace.public_url or '—' }}</td></tr>
-    </table>
+    <form method="post" action="/settings/workspace" class="edit-grid">
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+      <div><label>Name
+        <input type="text" name="name" value="{{ workspace.name }}" required></label></div>
+      <div><label>Slug (fixed)
+        <input type="text" value="{{ workspace.slug }}" disabled></label></div>
+      <div><label>Deployment profile
+        <select name="deployment_profile">
+          {% for p in deployment_profiles %}
+          <option value="{{ p }}" {{ 'selected' if (workspace.deployment_profile or 'private') == p }}>{{ p }}</option>
+          {% endfor %}
+        </select></label></div>
+      <div><label>Public / base URL
+        <input type="text" name="public_url" value="{{ workspace.public_url or '' }}"
+          placeholder="https://montauk.example.com"></label></div>
+      <div class="wide"><button type="submit">Save workspace</button></div>
+    </form>
   </div>
 
   <div class="card">
-    <h2>Review policy</h2>
-    <table>
-      <tr><th>Review threshold</th><td>{{ ws_settings.review_threshold }}</td></tr>
-      <tr><th>Allowed reviewers</th><td>{{ ws_settings.allowed_reviewers }}</td></tr>
-      <tr><th>Timezone</th><td>{{ ws_settings.timezone }}</td></tr>
-      <tr><th>Daily extraction time</th><td>{{ ws_settings.daily_extraction_time }}</td></tr>
-    </table>
-    <p class="muted">Editing review/extraction policy is enabled once extraction lands.</p>
+    <h2>Processing &amp; review policy</h2>
+    <form method="post" action="/settings/review-policy" class="edit-grid">
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+      <div><label>Review threshold
+        <select name="review_threshold">
+          {% for v in review_thresholds %}
+          <option value="{{ v }}" {{ 'selected' if ws_settings.review_threshold == v }}>{{ v }}</option>
+          {% endfor %}
+        </select></label></div>
+      <div><label>Allowed reviewers
+        <select name="allowed_reviewers">
+          {% for v in allowed_reviewers_options %}
+          <option value="{{ v }}" {{ 'selected' if ws_settings.allowed_reviewers == v }}>{{ v }}</option>
+          {% endfor %}
+        </select></label></div>
+      <div><label>Timezone (IANA name)
+        <input type="text" name="timezone" value="{{ ws_settings.timezone }}"
+          placeholder="America/New_York"></label></div>
+      <div><label>Daily extraction time (HH:MM, 24-hour)
+        <input type="text" name="daily_extraction_time" value="{{ ws_settings.daily_extraction_time }}"
+          pattern="[0-2][0-9]:[0-5][0-9]"></label></div>
+      <div><label>New-thread historical ingestion
+        <select name="historical_ingestion_default">
+          {% for v in historical_ingestion_options %}
+          <option value="{{ v }}" {{ 'selected' if ws_settings.historical_ingestion_default == v }}>{{ v }}</option>
+          {% endfor %}
+        </select></label></div>
+      <div><label style="display:flex;gap:0.4rem;align-items:center">
+        <input type="checkbox" name="agent_transcript_access" value="1" style="width:auto"
+          {{ 'checked' if ws_settings.agent_transcript_access }}>
+        Allow agent transcript access</label></div>
+      <div class="wide"><button type="submit">Save processing &amp; review</button></div>
+    </form>
+    <p class="muted">Extraction, connectors, and reviews are not active in this build &mdash;
+      these values are stored and take effect when those subsystems land.</p>
+  </div>
+
+  <div class="card">
+    <h2>Change password</h2>
+    <form method="post" action="/settings/password" class="stack">
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+      <div><label for="cur-pw">Current password</label>
+        <input type="password" id="cur-pw" name="current_password" autocomplete="current-password" required data-reveal></div>
+      <div><label for="new-pw">New password (10+ characters)</label>
+        <input type="password" id="new-pw" name="new_password" autocomplete="new-password" minlength="10" required data-reveal></div>
+      <div><label for="new-pw2">Confirm new password</label>
+        <input type="password" id="new-pw2" name="new_password_confirm" autocomplete="new-password" required data-reveal></div>
+      <button type="submit">Change password</button>
+    </form>
+    <p class="muted">Changing your password signs out every other session.</p>
   </div>
 
   <div class="card">

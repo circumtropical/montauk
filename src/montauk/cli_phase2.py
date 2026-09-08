@@ -158,10 +158,18 @@ def dashboard(
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(8817, "--port"),
     database_url: str | None = DbUrlOption,
+    behind_proxy: bool = typer.Option(
+        False,
+        "--behind-proxy",
+        help="Serve behind an HTTPS reverse proxy (e.g. Caddy): trust X-Forwarded-* "
+        "from localhost and mark session cookies Secure.",
+    ),
 ) -> None:
     """Run the Montauk web dashboard (spec 25). Binds to localhost by
     default; put a TLS-terminating reverse proxy in front for anything
-    beyond loopback / a private network."""
+    beyond loopback / a private network. It can share one hostname with
+    the MCP server -- route ``/mcp`` to the MCP port and everything else
+    here (see docs/deploy-phase2-shared-host.md)."""
     import os
 
     import uvicorn
@@ -175,14 +183,23 @@ def dashboard(
 
     loopback = host in ("127.0.0.1", "::1", "localhost")
     os.environ["MONTAUK_DATABASE_URL"] = url
-    os.environ["MONTAUK_DASHBOARD_SECURE_COOKIES"] = "0" if loopback else "1"
-    if not loopback:
+    # Secure cookies whenever TLS is actually in front (proxy or a public bind);
+    # honour an explicit MONTAUK_DASHBOARD_SECURE_COOKIES if the operator set one.
+    if "MONTAUK_DASHBOARD_SECURE_COOKIES" not in os.environ:
+        os.environ["MONTAUK_DASHBOARD_SECURE_COOKIES"] = "0" if (loopback and not behind_proxy) else "1"
+    if not loopback and not behind_proxy:
         typer.echo(
-            "warning: binding beyond loopback -- serve behind HTTPS so session cookies "
-            "and credentials are not sent in the clear.",
+            "warning: binding beyond loopback without --behind-proxy -- serve behind "
+            "HTTPS so session cookies and credentials are not sent in the clear.",
             err=True,
         )
-    uvicorn.run("montauk.web.wsgi:app", host=host, port=port)
+    uvicorn.run(
+        "montauk.web.wsgi:app",
+        host=host,
+        port=port,
+        proxy_headers=behind_proxy,
+        forwarded_allow_ips="127.0.0.1,::1" if behind_proxy else None,
+    )
 
 
 def register(app: typer.Typer) -> None:

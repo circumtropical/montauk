@@ -11,7 +11,9 @@ from montauk.db.crypto import verify_password
 from montauk.services.auth import (
     AccountLocked,
     LoginThrottle,
+    PasswordChangeError,
     authenticate,
+    change_password,
     create_session,
     destroy_session,
     resolve_session,
@@ -166,3 +168,81 @@ class TestSessions:
         db_session.flush()
         stored = db_session.query(orm.Session).all()
         assert all(raw not in s.token_hash for s in stored)
+
+
+class TestChangePassword:
+    @pytest.fixture
+    def owner(self, db_session):
+        user, ws = bootstrap_deployment(
+            db_session, email="owner@example.com", password="old-passphrase-1", workspace_name="WS"
+        )
+        db_session.flush()
+        return user, ws
+
+    def test_happy_path_and_other_sessions_revoked(self, db_session, owner):
+        from montauk.db import models as orm
+
+        user, ws = owner
+        keep = create_session(db_session, user=user, workspace_id=ws.id)
+        create_session(db_session, user=user, workspace_id=ws.id)  # a second device
+        db_session.flush()
+        keep_ctx = resolve_session(db_session, keep)
+
+        change_password(
+            db_session,
+            user_id=user.id,
+            current_password="old-passphrase-1",
+            new_password="brand-new-passphrase",
+            new_password_confirm="brand-new-passphrase",
+            keep_session_token_hash=keep_ctx.session_token_hash,
+        )
+        db_session.flush()
+
+        assert db_session.query(orm.Session).count() == 1  # only the kept one
+        assert (
+            authenticate(
+                db_session,
+                email="owner@example.com",
+                password="brand-new-passphrase",
+                throttle=LoginThrottle(),
+            )
+            is not None
+        )
+
+    def test_wrong_current_password_rejected(self, db_session, owner):
+        user, _ = owner
+        with pytest.raises(PasswordChangeError):
+            change_password(
+                db_session,
+                user_id=user.id,
+                current_password="nope",
+                new_password="another-good-one",
+                new_password_confirm="another-good-one",
+            )
+
+    def test_new_password_rules(self, db_session, owner):
+        user, _ = owner
+        with pytest.raises(PasswordChangeError):  # too short
+            change_password(
+                db_session,
+                user_id=user.id,
+                current_password="old-passphrase-1",
+                new_password="short",
+                new_password_confirm="short",
+            )
+        with pytest.raises(PasswordChangeError):  # mismatch
+            change_password(
+                db_session,
+                user_id=user.id,
+                current_password="old-passphrase-1",
+                new_password="a-fine-new-password",
+                new_password_confirm="different-one",
+            )
+        with pytest.raises(PasswordChangeError):  # unchanged
+            change_password(
+                db_session,
+                user_id=user.id,
+                current_password="old-passphrase-1",
+                new_password="old-passphrase-1",
+                new_password_confirm="old-passphrase-1",
+            )

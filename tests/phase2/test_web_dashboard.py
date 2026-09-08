@@ -288,7 +288,7 @@ class TestWithMigratedData:
         r = self._post(populated, f"/people/P0002/facts/{fid}/delete", _reason="mistake")
         assert r.status_code == 303
         after = populated.get("/people/P0002").text
-        assert f"/people/P0002/facts/{fid}\"" not in after  # no edit form for it any more
+        assert f'/people/P0002/facts/{fid}"' not in after  # no edit form for it any more
         assert "removed" in after and "mistake" in after  # but the revision is recorded
 
     def test_add_fact_with_related_person_becomes_a_relationship(self, populated):
@@ -343,7 +343,7 @@ class TestWithMigratedData:
         r = self._post(populated, f"/people/P0002/interactions/{iid}/delete")
         assert r.status_code == 303
         after = populated.get("/people/P0002").text
-        assert f"/people/P0002/interactions/{iid}\"" not in after
+        assert f'/people/P0002/interactions/{iid}"' not in after
 
     def test_interaction_requires_a_date(self, populated):
         r = self._post(populated, "/people/P0002/interactions", summary="no date given")
@@ -373,6 +373,46 @@ class TestWithMigratedData:
 
     def test_transcripts_page_shows_degraded_state(self, populated):
         assert "No inbound connectors" in populated.get("/transcripts").text
+
+    def test_create_person_from_directory(self, populated):
+        csrf = _csrf(populated, "/people")
+        r = populated.post(
+            "/people",
+            data={"_csrf": csrf, "name": "Wendell Borton", "company": "Springfield Elementary"},
+            follow_redirects=False,
+        )
+        assert r.status_code == 303
+        new_url = r.headers["location"]
+        assert new_url.startswith("/people/P00")  # Montauk assigned the id
+        page = populated.get(new_url).text
+        assert "Wendell Borton" in page and "Springfield Elementary" in page
+
+    def test_create_person_requires_a_name(self, populated):
+        csrf = _csrf(populated, "/people")
+        r = populated.post("/people", data={"_csrf": csrf, "name": "  "}, follow_redirects=False)
+        assert r.status_code == 400
+        assert "name" in r.text.lower()
+
+    def test_create_person_flags_shared_name(self, populated):
+        csrf = _csrf(populated, "/people")
+        r = populated.post("/people", data={"_csrf": csrf, "name": "Dana Whitfield"}, follow_redirects=False)
+        dest = r.headers["location"]
+        assert "dupes=" in dest
+        assert "share this name" in populated.get(dest).text
+
+    def test_archive_and_restore_from_directory(self, populated):
+        csrf = _csrf(populated, "/people")
+        populated.post("/people/P0001/archive", data={"_csrf": csrf})
+        assert "P0001" not in populated.get("/people?show=active").text
+        arch = populated.get("/people?show=archived").text
+        assert "P0001" in arch and "/people/P0001/restore" in arch
+        populated.post("/people/P0001/restore", data={"_csrf": csrf})
+        assert "P0001" in populated.get("/people?show=active").text
+
+    def test_directory_has_add_and_archive_controls(self, populated):
+        html = populated.get("/people").text
+        assert 'action="/people"' in html and "Add a person" in html
+        assert "/people/P0001/archive" in html  # per-row archive button
 
 
 class TestSettings:
@@ -421,6 +461,104 @@ class TestSettings:
         )
         html = client.get("/settings").text
         assert "succeeded" in html
+
+    def test_settings_fields_are_editable_forms(self, logged_in):
+        html = logged_in.get("/settings").text
+        assert 'action="/settings/workspace"' in html
+        assert 'action="/settings/review-policy"' in html
+        assert 'action="/settings/password"' in html
+        assert 'name="review_threshold"' in html and "<select" in html
+
+    def test_save_workspace_settings(self, logged_in):
+        csrf = _csrf(logged_in, "/settings")
+        r = logged_in.post(
+            "/settings/workspace",
+            data={
+                "_csrf": csrf,
+                "name": "My Circle",
+                "deployment_profile": "public",
+                "public_url": "https://montauk.example.com",
+            },
+        )
+        assert r.status_code == 200
+        again = logged_in.get("/settings").text
+        assert 'value="My Circle"' in again and "montauk.example.com" in again
+
+    def test_save_workspace_rejects_public_without_https(self, logged_in):
+        csrf = _csrf(logged_in, "/settings")
+        r = logged_in.post(
+            "/settings/workspace",
+            data={"_csrf": csrf, "name": "X", "deployment_profile": "public", "public_url": ""},
+        )
+        assert r.status_code == 400
+
+    def test_save_review_policy(self, logged_in):
+        csrf = _csrf(logged_in, "/settings")
+        r = logged_in.post(
+            "/settings/review-policy",
+            data={
+                "_csrf": csrf,
+                "review_threshold": "review_all",
+                "allowed_reviewers": "human_or_authorized_agent",
+                "timezone": "Europe/Berlin",
+                "daily_extraction_time": "06:15",
+                "historical_ingestion_default": "future_only",
+                "agent_transcript_access": "1",
+            },
+        )
+        assert r.status_code == 200
+        again = logged_in.get("/settings").text
+        assert "review_all" in again and "Europe/Berlin" in again and "06:15" in again
+
+    def test_review_policy_rejects_bad_time(self, logged_in):
+        csrf = _csrf(logged_in, "/settings")
+        r = logged_in.post(
+            "/settings/review-policy",
+            data={
+                "_csrf": csrf,
+                "review_threshold": "automatic_all",
+                "allowed_reviewers": "human_only",
+                "timezone": "UTC",
+                "daily_extraction_time": "9am",
+                "historical_ingestion_default": "all_history",
+            },
+        )
+        assert r.status_code == 400
+
+    def test_change_password_flow(self, logged_in):
+        csrf = _csrf(logged_in, "/settings")
+        bad = logged_in.post(
+            "/settings/password",
+            data={
+                "_csrf": csrf,
+                "current_password": "wrong",
+                "new_password": "a-good-new-one",
+                "new_password_confirm": "a-good-new-one",
+            },
+        )
+        assert bad.status_code == 400
+
+        ok = logged_in.post(
+            "/settings/password",
+            data={
+                "_csrf": csrf,
+                "current_password": OWNER["password"],
+                "new_password": "a-fresh-new-password",
+                "new_password_confirm": "a-fresh-new-password",
+            },
+        )
+        assert ok.status_code == 200
+        # current session still works; new password authenticates on a fresh client
+        assert logged_in.get("/settings").status_code == 200
+        fresh = logged_in.__class__(logged_in.app)
+        assert (
+            fresh.post(
+                "/login",
+                data={"email": OWNER["email"], "password": "a-fresh-new-password"},
+                follow_redirects=False,
+            ).status_code
+            == 303
+        )
 
 
 class TestWorkspaceIsolationOverHTTP:

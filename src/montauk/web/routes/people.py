@@ -56,14 +56,17 @@ def _parse_messaging(raw: str) -> dict[str, str]:
     return out
 
 
-@router.get("", response_class=HTMLResponse)
-def directory(
+def _render_directory(
     request: Request,
-    auth: AuthContext = Depends(require_auth),
-    scope: WorkspaceScope = Depends(workspace_scope),
-    q: str = Query(""),
-    show: str = Query("active"),
-    page: int = Query(1, ge=1),
+    auth: AuthContext,
+    scope: WorkspaceScope,
+    *,
+    q: str = "",
+    show: str = "active",
+    page: int = 1,
+    create_error: str | None = None,
+    create_form: dict | None = None,
+    status_code: int = 200,
 ) -> HTMLResponse:
     repo = PeopleRepository(scope)
     archived = {"active": False, "archived": True, "all": None}.get(show, False)
@@ -102,8 +105,59 @@ def directory(
             has_next=has_next,
             active_count=repo.count(archived=False),
             archived_count=repo.count(archived=True),
+            create_error=create_error,
+            create_form=create_form or {},
         ),
+        status_code=status_code,
     )
+
+
+@router.get("", response_class=HTMLResponse)
+def directory(
+    request: Request,
+    auth: AuthContext = Depends(require_auth),
+    scope: WorkspaceScope = Depends(workspace_scope),
+    q: str = Query(""),
+    show: str = Query("active"),
+    page: int = Query(1, ge=1),
+) -> HTMLResponse:
+    return _render_directory(request, auth, scope, q=q, show=show, page=page)
+
+
+@router.post("", response_class=HTMLResponse, dependencies=[Depends(csrf_protect)])
+async def create_person(
+    request: Request,
+    auth: AuthContext = Depends(require_auth),
+    scope: WorkspaceScope = Depends(workspace_scope),
+) -> Response:
+    repo = PeopleRepository(scope)
+    f = await request.form()
+    values = {
+        "name": str(f.get("name", "")),
+        "summary": str(f.get("summary", "")),
+        "company": str(f.get("company", "")),
+        "location": str(f.get("location", "")),
+    }
+    try:
+        person = Person(
+            id=repo.allocate_public_id(),
+            name=values["name"],
+            summary=_clean(values["summary"]),
+            company=_clean(values["company"]),
+            location=_clean(values["location"]),
+        )
+    except ValidationError as exc:
+        scope.session.rollback()
+        return _render_directory(
+            request, auth, scope, create_error=_err_message(exc), create_form=values, status_code=400
+        )
+    repo.create(person)
+    scope.session.flush()
+    dupes = repo.find_by_name(person.name, exclude_public_id=person.id)
+    dest = f"/people/{person.id}"
+    if dupes:
+        dest += "?dupes=" + ",".join(d.public_id for d in dupes)
+    return RedirectResponse(dest, status_code=303)
 
 
 def _load(scope: WorkspaceScope, public_id: str) -> tuple[PeopleRepository, orm.Person]:
@@ -158,9 +212,18 @@ def _render_person(
             revisions=revisions,
             edit_error=error,
             form=form or _person_form_values(domain),
+            flash=_dupes_flash(request),
         ),
         status_code=status_code,
     )
+
+
+def _dupes_flash(request: Request) -> str | None:
+    raw = request.query_params.get("dupes")
+    if not raw:
+        return None
+    ids = [p for p in raw.split(",") if p]
+    return f"Created. Note: {len(ids)} other record(s) share this name ({', '.join(ids)})."
 
 
 def _person_form_values(domain: Person) -> dict:

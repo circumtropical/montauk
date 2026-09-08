@@ -3,14 +3,32 @@
 {% block body %}
   <h1>People</h1>
 
+  <details class="add" {{ 'open' if create_error }}>
+    <summary>&#65291; Add a person</summary>
+    {% if create_error %}<div class="notice error" role="alert">{{ create_error }}</div>{% endif %}
+    <form method="post" action="/people" class="edit-grid">
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+      <div><label>Name (required; partial or approximate is fine)
+        <input type="text" name="name" value="{{ create_form.name or '' }}" required></label></div>
+      <div><label>Company
+        <input type="text" name="company" value="{{ create_form.company or '' }}"></label></div>
+      <div><label>Location
+        <input type="text" name="location" value="{{ create_form.location or '' }}"></label></div>
+      <div class="wide"><label>Summary
+        <textarea name="summary" rows="2">{{ create_form.summary or '' }}</textarea></label></div>
+      <div class="wide"><button type="submit">Create person</button>
+        <span class="muted">Montauk assigns the permanent ID. Search first if they might already exist.</span></div>
+    </form>
+  </details>
+
   <form method="get" action="/people" class="searchbar">
     <div>
       <label for="q">Search name, alias, contact, company, location</label>
-      <input type="search" id="q" name="q" value="{{ q }}" autofocus>
+      <input type="search" id="q" name="q" value="{{ q }}">
     </div>
     <div style="flex:0 0 10rem">
       <label for="show">Show</label>
-      <select id="show" name="show" onchange="this.form.submit()">
+      <select id="show" name="show" data-autosubmit>
         <option value="active" {{ 'selected' if show == 'active' }}>Active ({{ active_count }})</option>
         <option value="archived" {{ 'selected' if show == 'archived' }}>Archived ({{ archived_count }})</option>
         <option value="all" {{ 'selected' if show == 'all' }}>All</option>
@@ -22,7 +40,7 @@
   {% if people %}
   <div class="scroll-x">
   <table>
-    <thead><tr><th>ID</th><th>Name</th><th>Company</th><th>Location</th><th></th></tr></thead>
+    <thead><tr><th>ID</th><th>Name</th><th>Company</th><th>Location</th><th>Export</th><th></th></tr></thead>
     <tbody>
     {% for p in people %}
       <tr>
@@ -38,6 +56,20 @@
         <td>{{ p.location or '' }}</td>
         <td><a href="/export/person/{{ p.public_id }}.md">.md</a> &middot;
             <a href="/export/person/{{ p.public_id }}.json">.json</a></td>
+        <td>
+          {% if p.archived %}
+          <form method="post" action="/people/{{ p.public_id }}/restore" class="inline">
+            <input type="hidden" name="_csrf" value="{{ csrf }}">
+            <button type="submit" class="secondary">Restore</button>
+          </form>
+          {% else %}
+          <form method="post" action="/people/{{ p.public_id }}/archive" class="inline"
+                data-confirm="Archive {{ p.name }}? They stay recoverable.">
+            <input type="hidden" name="_csrf" value="{{ csrf }}">
+            <button type="submit" class="danger">Archive</button>
+          </form>
+          {% endif %}
+        </td>
       </tr>
     {% endfor %}
     </tbody>
@@ -49,7 +81,8 @@
   </p>
   {% else %}
     <p class="muted">
-      {% if q %}No people match &ldquo;{{ q }}&rdquo;.{% else %}No people yet. Import a Phase 1 deployment with <code>montauk migrate phase2</code>.{% endif %}
+      {% if q %}No people match &ldquo;{{ q }}&rdquo;.{% else %}No people yet &mdash; use &ldquo;Add a person&rdquo; above,
+      or import a Phase 1 deployment with <code>montauk migrate phase2</code>.{% endif %}
     </p>
   {% endif %}
 {% endblock %}

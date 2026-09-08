@@ -34,4 +34,11 @@
       if (!window.confirm(form.getAttribute("data-confirm"))) e.preventDefault();
     });
   });
+
+  // Auto-submit a filter <select> on change (CSP-safe; degrades to the Search button).
+  document.querySelectorAll("select[data-autosubmit]").forEach(function (sel) {
+    sel.addEventListener("change", function () {
+      if (sel.form) sel.form.submit();
+    });
+  });
 })();

@@ -97,6 +97,42 @@ def authenticate(
     return user
 
 
+MIN_PASSWORD_LEN = 10
+
+
+class PasswordChangeError(ValueError):
+    pass
+
+
+def change_password(
+    session: Session,
+    *,
+    user_id: uuid.UUID,
+    current_password: str,
+    new_password: str,
+    new_password_confirm: str,
+    keep_session_token_hash: str | None = None,
+) -> None:
+    """Verify the current password, set a new one, and log out every other
+    session for this user (spec 27). The caller's own session is kept."""
+    user = session.get(orm.User, user_id)
+    if user is None:
+        raise PasswordChangeError("user not found")
+    if not verify_password(user.password_hash, current_password):
+        raise PasswordChangeError("current password is incorrect")
+    if len(new_password) < MIN_PASSWORD_LEN:
+        raise PasswordChangeError(f"new password must be at least {MIN_PASSWORD_LEN} characters")
+    if new_password != new_password_confirm:
+        raise PasswordChangeError("new passwords do not match")
+    if verify_password(user.password_hash, new_password):
+        raise PasswordChangeError("new password must differ from the current one")
+    user.password_hash = _hash_password(new_password)
+    stmt = delete(orm.Session).where(orm.Session.user_id == user_id)
+    if keep_session_token_hash:
+        stmt = stmt.where(orm.Session.token_hash != keep_session_token_hash)
+    session.execute(stmt)
+
+
 def create_session(
     session: Session, *, user: orm.User, workspace_id: uuid.UUID, now: dt.datetime | None = None
 ) -> str:
