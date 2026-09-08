@@ -633,7 +633,7 @@ class TestLLMDashboard:
 
     def test_generate_summary_with_a_fake_model(self, logged_in, session_maker, tmp_path, monkeypatch):
         from montauk.llm.providers.fake import FakeProvider
-        from montauk.services import summaries
+        from montauk.services import briefing
 
         run_migration(
             session_maker,
@@ -648,7 +648,7 @@ class TestLLMDashboard:
             data={"_csrf": csrf, "provider_type": "claude_cli", "model": "claude-haiku-4-5"},
         )
         monkeypatch.setattr(
-            summaries,
+            briefing,
             "build_provider",
             lambda cfg: FakeProvider(
                 model="claude-haiku-4-5",
@@ -657,7 +657,7 @@ class TestLLMDashboard:
         )
         r = logged_in.post(
             "/people/P0001/summary",
-            data={"_csrf": csrf, "purpose": "work", "detail_level": "brief"},
+            data={"_csrf": csrf, "purpose": "work", "detail_level": "brief", "mode": "summary_only"},
         )
         assert r.status_code == 200
         assert "She is a robotics engineer in Portland." in r.text

@@ -23,9 +23,9 @@ from ...db.repositories import (
 from ...errors import MontaukValidationError
 from ...models import ContactInfo, Person, Source
 from ...schema import CATEGORIES, Confidence
-from ...services import model_config, summaries
+from ...services import briefing, model_config
 from ...services.auth import AuthContext
-from ...services.summaries import DETAIL_LEVELS as SUMMARY_DETAIL_LEVELS
+from ...services.briefing import COVERAGE_LEVELS as SUMMARY_DETAIL_LEVELS
 from ..app import TEMPLATES, get_state
 from ..deps import csrf_protect, page_context, require_auth, workspace_scope
 
@@ -230,6 +230,7 @@ def _render_person(
             summary_result=summary_result,
             cached_summaries=cached_summaries,
             summary_detail_levels=SUMMARY_DETAIL_LEVELS,
+            briefing_modes=briefing.MODES,
             summarization_configured=model_config.is_configured(
                 scope.session, scope.workspace_id, "summarization"
             ),
@@ -596,6 +597,7 @@ async def generate_person_summary(
     f = await request.form()
     purpose = str(f.get("purpose", "")).strip()
     detail_level = str(f.get("detail_level", "standard"))
+    mode = str(f.get("mode", "summary_only"))
     force = f.get("force") is not None
     if not purpose:
         return _render_person(
@@ -604,18 +606,21 @@ async def generate_person_summary(
             scope,
             repo,
             row,
-            error="Enter a purpose for the summary (the question or task it should serve).",
+            error="Enter a purpose for the briefing (the question or task it should serve).",
             status_code=400,
         )
     if detail_level not in SUMMARY_DETAIL_LEVELS:
         detail_level = "standard"
+    if mode not in briefing.MODES:
+        mode = "summary_only"
     try:
-        result = await summaries.generate_summary(
+        result = await briefing.prepare_briefing(
             scope.session,
             scope,
             public_id=public_id,
             purpose=purpose,
             detail_level=detail_level,
+            mode=mode,
             secret_box=get_state(request).secret_box,
             force=force,
         )

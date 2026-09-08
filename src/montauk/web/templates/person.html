@@ -9,35 +9,49 @@
   <p class="muted">{{ p.id }}{% if p.aliases %} &middot; aka {{ p.aliases|join(', ') }}{% endif %}</p>
 
   <div class="card">
-    <h2>Ask &amp; summarize</h2>
+    <h2>Ask &amp; brief</h2>
     {% if summarization_configured %}
       <form method="post" action="/people/{{ p.id }}/summary" class="searchbar">
         <input type="hidden" name="_csrf" value="{{ csrf }}">
         <div style="flex:1 1 22rem"><label for="sum-purpose">Question / purpose</label>
           <input type="text" id="sum-purpose" name="purpose" autofocus
             value="{{ summary_result.purpose if summary_result else '' }}"
-            placeholder="e.g. what's the state of things and what should I ask about next time"></div>
-        <div style="flex:0 0 9rem"><label for="sum-detail">Detail</label>
+            placeholder="e.g. brief me before I call {{ p.name.split()[0] }} &mdash; or: what is {{ p.name.split()[0] }}'s birthday?"></div>
+        <div style="flex:0 0 9rem"><label for="sum-detail">Coverage</label>
           <select id="sum-detail" name="detail_level">
             {% for d in summary_detail_levels %}
             <option value="{{ d }}" {{ 'selected' if d == (summary_result.detail_level if summary_result else 'standard') }}>{{ d }}</option>
             {% endfor %}
           </select></div>
-        <button type="submit">Summarize</button>
+        <div style="flex:0 0 12rem"><label for="sum-mode">Mode</label>
+          <select id="sum-mode" name="mode">
+            {% for m in briefing_modes %}
+            <option value="{{ m }}" {{ 'selected' if m == (summary_result.mode if summary_result else 'summary_only') }}>{{ m.replace('_', ' ') }}</option>
+            {% endfor %}
+          </select></div>
+        <button type="submit">Run</button>
       </form>
+      <p class="muted" style="margin-top:0.4rem">A broad request returns a compact model-written
+        briefing plus the source refs it drew on; a narrow factual question
+        (&ldquo;what is their birthday?&rdquo;) is answered from the structured field with no model call.
+        <code>evidence only</code> returns the selected records without prose;
+        <code>summary with evidence</code> returns both (for auditing).</p>
     {% else %}
       <p class="muted">No summarization model is configured &mdash;
-        <a href="/settings">set one in Settings → Model &amp; provider</a> to ask questions here.
-        (Agents calling <code>prepare_person_context</code> get the deterministic evidence packet
-        regardless; this feature adds a model on top.)</p>
+        <a href="/settings">set one in Settings → Model &amp; provider</a> to generate briefings here.
+        Without one, broad requests fall back to the deterministic evidence packet
+        (<code>generated: false</code>); narrow factual questions always work.</p>
     {% endif %}
 
     {% if summary_result %}
       {% set sr = summary_result %}
       <div class="notice {{ 'error' if sr.status == 'llm_error' }}" style="margin-top:0.8rem">
         <p class="muted">
-          &ldquo;{{ sr.purpose }}&rdquo; &middot; {{ sr.detail_level }}
-          {%- if sr.generated %} &middot; {{ sr.model }} ({{ sr.provider_type }}){% else %} &middot; <strong>not generated</strong> &mdash; {{ sr.status }}{% endif %}
+          &ldquo;{{ sr.purpose }}&rdquo;
+          {%- if sr.status == 'direct' %} &middot; <strong>{{ sr.direct_field }}</strong> (structured field &mdash; no model call)
+          {%- else %} &middot; {{ sr.detail_level }} &middot; {{ sr.mode.replace('_', ' ') }}{% endif %}
+          {%- if sr.generated %} &middot; {{ sr.model }} ({{ sr.provider_type }})
+          {%- elif sr.status != 'direct' %} &middot; <strong>not generated</strong> &mdash; {{ sr.status }}{% endif %}
           {%- if sr.cached %} &middot; cached {{ sr.created_at|humantime }}{% endif %}
           {%- if sr.stale %} &middot; <strong>record changed since</strong>{% endif %}
           {%- if sr.latency_ms %} &middot; {{ sr.latency_ms }} ms{% endif %}
@@ -46,12 +60,16 @@
         </p>
         {% if sr.note %}<p class="muted">{{ sr.note }}</p>{% endif %}
         <pre style="white-space:pre-wrap">{{ sr.body }}</pre>
+        {% if sr.source_refs and sr.status != 'direct' %}
+        <p class="muted">source refs: <code>{{ sr.source_refs|join(', ') }}</code></p>
+        {% endif %}
         <div class="row-actions">
-          {% if summarization_configured %}
+          {% if summarization_configured and sr.status != 'direct' %}
           <form method="post" action="/people/{{ p.id }}/summary" class="inline">
             <input type="hidden" name="_csrf" value="{{ csrf }}">
             <input type="hidden" name="purpose" value="{{ sr.purpose }}">
             <input type="hidden" name="detail_level" value="{{ sr.detail_level }}">
+            <input type="hidden" name="mode" value="{{ sr.mode }}">
             <input type="hidden" name="force" value="1">
             <button type="submit" class="secondary">Regenerate</button>
           </form>
@@ -61,10 +79,10 @@
         {% if sr.evidence_text %}
         <details>
           <summary>Debug &mdash; exactly what was sent to the model</summary>
-          <p class="muted">This path sends the person's <strong>whole curated record</strong>
-            ({{ sr.evidence_item_count }} fact/interaction items) &mdash; there is no vector
-            retrieval step here (that is what <code>prepare_person_context</code> does, and it
-            has no LLM). The model turns this evidence into purpose-specific prose.</p>
+          <p class="muted">Montauk ranked and trimmed this person's curated record for the purpose
+            ({{ sr.evidence_item_count }} source refs), then the model compressed it into the
+            briefing above. The claim-to-source mapping is retained for
+            <code>get_context_sources</code>.</p>
           <h3>System prompt</h3>
           <pre style="white-space:pre-wrap">{{ sr.system_prompt }}</pre>
           <h3>User prompt (purpose + evidence)</h3>
@@ -95,6 +113,7 @@ reported_cost_usd: {{ sr.reported_cost_usd }}</pre>
           <input type="hidden" name="_csrf" value="{{ csrf }}">
           <input type="hidden" name="purpose" value="{{ c.purpose }}">
           <input type="hidden" name="detail_level" value="{{ c.detail_level }}">
+          <input type="hidden" name="mode" value="{{ (c.evidence_refs or {}).get('mode', 'summary_only') }}">
           <div class="fact">
             <button type="submit" class="secondary" style="float:right">Re-run</button>
             <div class="meta">&ldquo;{{ c.purpose }}&rdquo; &middot; {{ c.detail_level }} &middot;
