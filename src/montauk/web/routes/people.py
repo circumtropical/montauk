@@ -203,6 +203,7 @@ def _render_person(
             .where(orm.SummaryCacheEntry.workspace_id == scope.workspace_id)
             .where(orm.SummaryCacheEntry.person_id == row.id)
             .where(orm.SummaryCacheEntry.invalidated_at.is_(None))
+            .where(orm.SummaryCacheEntry.generated.is_(True))
             .order_by(orm.SummaryCacheEntry.created_at.desc())
         ).scalars()
     )

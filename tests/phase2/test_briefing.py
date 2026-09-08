@@ -244,6 +244,36 @@ class TestProgressiveDisclosure:
         assert payload["evidence"]["facts"]
         assert "briefing" not in payload
 
+    async def test_fallback_is_not_cached_and_does_not_shadow_a_later_success(
+        self, db_session, scope, workspace, secret_box, monkeypatch
+    ):
+        _make_person(scope)
+
+        # First run: no model configured -> deterministic fallback.
+        first = await briefing.prepare_briefing(
+            db_session,
+            scope,
+            public_id="P0001",
+            purpose="what should I discuss with Dana",
+            secret_box=secret_box,
+        )
+        assert first.generated is False and first.cached is False
+        assert db_session.query(orm.SummaryCacheEntry).count() == 0  # fallback not persisted
+
+        # Model becomes available; the same request now generates, it is not
+        # shadowed by the earlier unavailable result.
+        _configure_model(db_session, workspace, secret_box)
+        _fake(monkeypatch, "Discuss the promotion.\nSOURCE_REFS: fact-1")
+        second = await briefing.prepare_briefing(
+            db_session,
+            scope,
+            public_id="P0001",
+            purpose="what should I discuss with Dana",
+            secret_box=secret_box,
+        )
+        assert second.generated is True and second.status == "ok"
+        assert second.agent_payload()["briefing"] == "Discuss the promotion."
+
     async def test_briefing_does_not_mutate_canonical_memory(
         self, db_session, scope, workspace, secret_box, monkeypatch
     ):

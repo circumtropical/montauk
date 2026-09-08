@@ -418,13 +418,17 @@ async def prepare_briefing(
         existing.invalidated_at = None
         session.flush()
 
-    cached_refs = (existing.evidence_refs or {}).get("refs", refs) if existing is not None else refs
-    if existing is not None and not force and existing.invalidated_at is None:
+    # Only a successfully generated briefing is served from cache. A leftover
+    # non-generated row (from a run made before a model was configured, or a
+    # transient provider failure) must NOT shadow a fresh attempt -- fall
+    # through and regenerate, overwriting it on success.
+    if existing is not None and existing.generated and not force and existing.invalidated_at is None:
         stale = existing.memory_fingerprint != fingerprint
+        cached_refs = (existing.evidence_refs or {}).get("refs", refs)
         out = _result(
-            generated=existing.generated,
-            status="ok" if existing.generated else "llm_unavailable",
-            briefing=existing.body if existing.generated else None,
+            generated=True,
+            status="ok",
+            briefing=existing.body,
             source_refs=cached_refs,
             model=existing.model,
             provider_type=existing.provider_type,
@@ -433,9 +437,7 @@ async def prepare_briefing(
             evidence_snapshot=(existing.evidence_refs or {}).get("snapshot"),
             note="Source records changed since this briefing was generated." if stale else None,
         )
-        if not existing.generated:
-            out.evidence = evidence  # deterministic fallback packet
-        elif mode == "summary_with_evidence":
+        if mode == "summary_with_evidence":
             out.evidence = evidence
         return out
 
@@ -444,7 +446,8 @@ async def prepare_briefing(
     provider = build_provider(resolved)
 
     def _fallback(status: str, note: str | None) -> BriefingResult:
-        _persist(generated=False, body="", model=None, provider_type=None)
+        # A fallback is never cached: it must be retried as soon as a model
+        # becomes available, and the retrieval it repeats is cheap (local).
         return _result(
             generated=False,
             status=status,
