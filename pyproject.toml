@@ -24,6 +24,7 @@ dependencies = [
     "itsdangerous>=2.2.0",
     "argon2-cffi>=25.1.0",
     "cryptography>=50.0.1",
+    "anthropic>=1.4.0",
 ]
 
 [project.scripts]
@@ -72,6 +73,7 @@ files = [
     "src/montauk/services",
     "src/montauk/exporters",
     "src/montauk/web",
+    "src/montauk/llm",
     "src/montauk/phase2_migration.py",
     "src/montauk/cli_phase2.py",
 ]
