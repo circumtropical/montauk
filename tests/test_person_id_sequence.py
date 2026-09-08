@@ -5,8 +5,8 @@ import asyncio
 import json
 
 import pytest
-
 from _helpers import call, running_session
+
 from montauk.ids import PERSON_ID_RE
 from montauk.markdown_store import MarkdownStore, PersonIdSequence
 

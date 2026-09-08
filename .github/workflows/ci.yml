@@ -9,12 +9,47 @@ permissions:
   contents: read
 
 jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          python-version: "3.12"
+      - run: uv sync --locked
+      - name: Ruff lint
+        run: uv run ruff check .
+      - name: Ruff format (Phase 2 modules)
+        run: >
+          uv run ruff format --check
+          src/montauk/db src/montauk/services src/montauk/web
+          src/montauk/exporters tests/phase2
+      - name: Mypy (Phase 2 modules)
+        run: uv run mypy
+
   test:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         python-version: ["3.11", "3.12", "3.13"]
+
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: montauk
+          POSTGRES_PASSWORD: montauk
+          POSTGRES_DB: montauk_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U montauk"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
     steps:
       - uses: actions/checkout@v4
@@ -38,3 +73,4 @@ jobs:
         run: uv run pytest -q
         env:
           FASTEMBED_CACHE_PATH: ${{ github.workspace }}/.fastembed_cache
+          MONTAUK_TEST_DATABASE_URL: postgresql://montauk:montauk@localhost:5432/montauk_test

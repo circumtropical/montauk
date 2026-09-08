@@ -6,10 +6,10 @@ natural-language rule.
 """
 
 import pytest
+from _helpers import call, call_expecting_error, running_session
 from mcp import ClientSession
 from mcp.client._memory import InMemoryTransport
 
-from _helpers import call, call_expecting_error, running_session
 from montauk.server import SERVER_INSTRUCTIONS, create_server
 
 NARRATIVE_MUTATION_TOOLS = ("add_fact", "update_fact", "update_summary", "update_person_batch")

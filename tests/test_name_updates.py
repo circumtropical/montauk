@@ -3,7 +3,6 @@ permanent; the name is the best info currently known and can be corrected
 without recreating the record."""
 
 import pytest
-
 from _helpers import call, call_expecting_error, running_session
 
 
@@ -121,7 +120,6 @@ class TestUpdatePersonName:
     @pytest.mark.asyncio
     async def test_archive_description_is_not_a_rename_workflow(self, tmp_path):
         async with running_session(tmp_path) as (session, _ctx):
-            tools = {t.name: t for t in (await session.list_tools()).tools}
             # server instructions steer agents away from archive-to-rename
             from montauk.server import SERVER_INSTRUCTIONS
 

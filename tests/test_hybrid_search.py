@@ -1,6 +1,6 @@
 import pytest
-
 from _helpers import call, running_session
+
 from montauk.embeddings.local import LocalEmbeddingProvider
 
 

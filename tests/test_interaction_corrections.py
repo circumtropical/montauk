@@ -2,7 +2,6 @@
 inaccurate data is not erasing history."""
 
 import pytest
-
 from _helpers import call, call_expecting_error, running_session
 
 

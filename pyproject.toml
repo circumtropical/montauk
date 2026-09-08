@@ -15,6 +15,15 @@ dependencies = [
     "starlette>=0.38",
     "uvicorn>=0.30",
     "tzdata; sys_platform == 'win32'",
+    "sqlalchemy>=2.0.52",
+    "alembic>=1.19.2",
+    "psycopg[binary]>=3.3.5",
+    "fastapi>=0.141.1",
+    "jinja2>=3.1.6",
+    "python-multipart>=0.0.32",
+    "itsdangerous>=2.2.0",
+    "argon2-cffi>=25.1.0",
+    "cryptography>=50.0.1",
 ]
 
 [project.scripts]
@@ -29,10 +38,47 @@ packages = ["src/montauk"]
 
 [dependency-groups]
 dev = [
+    "mypy>=2.3.1",
     "pytest>=8.0",
     "pytest-asyncio>=0.24",
+    "ruff>=0.16.6",
+    "testcontainers[postgres]>=4.15.0",
 ]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = ["src/montauk/db/alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "UP", "W"]
+# str+Enum is an established pattern in schema.py/dates.py and relied on for
+# value serialization; StrEnum's differing str() is not a safe swap here.
+ignore = ["UP042"]
+
+[tool.ruff.lint.per-file-ignores]
+"src/montauk/db/alembic/env.py" = ["E402"]
+
+[tool.mypy]
+python_version = "3.11"
+# Phase 2 modules are typed from the start; extending strict typing to the
+# Phase 1 modules is tracked separately (ADR 0001).
+files = [
+    "src/montauk/db",
+    "src/montauk/services",
+    "src/montauk/exporters",
+    "src/montauk/web",
+]
+plugins = []
+warn_unused_ignores = true
+warn_redundant_casts = true
+disallow_untyped_defs = true
+check_untyped_defs = true
+
+[[tool.mypy.overrides]]
+module = ["testcontainers.*", "argon2.*"]
+ignore_missing_imports = true

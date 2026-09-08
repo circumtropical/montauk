@@ -6,10 +6,10 @@ Montauk-specific hard-coded integration.
 """
 
 import pytest
+from _helpers import running_session
 from mcp import ClientSession
 from mcp.client._memory import InMemoryTransport
 
-from _helpers import running_session
 from montauk.server import SERVER_INSTRUCTIONS, create_server
 
 

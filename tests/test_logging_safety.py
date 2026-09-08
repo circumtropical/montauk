@@ -6,7 +6,6 @@ identifiers, counts, timestamps, and status.
 import logging
 
 import pytest
-
 from _helpers import call, running_session
 
 SENSITIVE_SUMMARY = "Secretly considering leaving their spouse; told us in confidence."

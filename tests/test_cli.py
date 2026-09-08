@@ -41,7 +41,7 @@ class TestStatus:
         assert "valid people: 1" in result.stdout
 
 
-class TestRebuildIndex:
+class TestRebuildIndexSqliteRow:
     def test_rebuilds_and_reports_count(self, tmp_path):
         store = MarkdownStore(tmp_path / "data")
         store.write_person(Person(id="P0001", name="Homer Simpson"))
@@ -283,7 +283,7 @@ class TestMigrateIds:
         assert second.exit_code == 0
         assert "nothing to migrate" in second.stdout
 
-    def test_is_idempotent(self, tmp_path):
+    def test_init_is_idempotent(self, tmp_path):
         data_dir = tmp_path / "data"
         first = runner.invoke(app, ["init", "--data-dir", str(data_dir)])
         second = runner.invoke(app, ["init", "--data-dir", str(data_dir)])
