@@ -115,7 +115,7 @@ async def run_extraction(
     *,
     thread_id: uuid.UUID,
     secret_box: SecretBox | None,
-    max_days: int = 8,
+    max_days: int = 4,
 ) -> ExtractionResult:
     ws = scope.workspace_id
     parts = (
@@ -290,6 +290,9 @@ async def run_extraction(
             m.processing_status = "processed"
         result.days_processed += 1
         result.messages_processed += len(msgs)
+        # Commit each day as it finishes: a wedged model call on a later batch
+        # then can't lose this day's facts or hold its row locks open.
+        session.commit()
 
     session.flush()
     result.awaiting_remaining = (

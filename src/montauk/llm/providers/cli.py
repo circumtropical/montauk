@@ -11,13 +11,24 @@ writable (see docs/deploy-phase2-shared-host.md / the service unit).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import shutil
+import signal
 
 from ..base import LLMError, LLMNotConfigured, LLMResult, LLMTimeout
 
-_DEFAULT_TIMEOUT = 180.0
+_DEFAULT_TIMEOUT = 120.0
+# `claude` sometimes leaves a short-lived helper process holding its stdout
+# after the main process exits, so a read-to-EOF can hang indefinitely. Once
+# the process itself has exited we wait at most this long for the pipes.
+_PIPE_DRAIN_GRACE = 3.0
+
+
+def _kill_group(pgid: int) -> None:
+    with contextlib.suppress(ProcessLookupError, PermissionError, OSError):
+        os.killpg(pgid, signal.SIGKILL)
 
 
 async def _run(
@@ -32,12 +43,36 @@ async def _run(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             env={**os.environ, **env} if env else None,
+            start_new_session=True,  # own process group, so we can kill any helpers it spawns
         )
-        out, err = await asyncio.wait_for(proc.communicate(stdin.encode("utf-8")), timeout)
-    except TimeoutError as exc:
-        raise LLMTimeout(f"{argv[0]} timed out after {timeout:.0f}s") from exc
     except OSError as exc:
         raise LLMError(f"failed to run {argv[0]}: {exc}") from exc
+    pgid = proc.pid  # start_new_session -> the child leads a new group with this id
+
+    assert proc.stdin and proc.stdout and proc.stderr
+    p_stdin, p_stdout, p_stderr = proc.stdin, proc.stdout, proc.stderr
+
+    async def _talk() -> tuple[bytes, bytes]:
+        p_stdin.write(stdin.encode("utf-8"))
+        with contextlib.suppress(BrokenPipeError, ConnectionResetError):
+            await p_stdin.drain()
+        p_stdin.close()
+        out_task = asyncio.ensure_future(p_stdout.read())
+        err_task = asyncio.ensure_future(p_stderr.read())
+        await proc.wait()  # resolves on process exit even if a helper keeps the pipes open
+        done, pending = await asyncio.wait({out_task, err_task}, timeout=_PIPE_DRAIN_GRACE)
+        for t in pending:
+            t.cancel()
+        out = out_task.result() if out_task in done else b""
+        err = err_task.result() if err_task in done else b""
+        return out, err
+
+    try:
+        out, err = await asyncio.wait_for(_talk(), timeout)
+    except TimeoutError as exc:
+        raise LLMTimeout(f"{argv[0]} timed out after {timeout:.0f}s") from exc
+    finally:
+        _kill_group(pgid)  # nuke any lingering helper so no pipe/zombie is left behind
     return proc.returncode or 0, out.decode("utf-8", "replace"), err.decode("utf-8", "replace")
 
 
