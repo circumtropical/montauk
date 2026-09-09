@@ -2,10 +2,9 @@
 
 Person IDs are permanent, generic, sequential identifiers (``P0001``,
 ``P0002``, ...). They are assigned by Montauk, never derived from a
-person's name, and never reused -- see :class:`montauk.markdown_store.PersonIdSequence`
-for the concurrency-safe high-water-mark allocator. This module only
-holds the pure format helpers; the allocator needs filesystem access and
-lives with the canonical store.
+person's name, and never reused. This module holds the pure format
+helpers; the concurrency-safe high-water-mark allocator lives with the
+store in ``db/ids.py``.
 """
 
 from __future__ import annotations

@@ -16,8 +16,19 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
 from starlette.types import ASGIApp
 
-from ..auth import extract_bearer_token
 from ..services.agent_credentials import authenticate
+
+
+def extract_bearer_token(headers: dict[str, str] | None) -> str | None:
+    """Pull the token out of an ``Authorization: Bearer <token>`` header
+    (case-insensitive header name and scheme). Returns None when absent or
+    malformed."""
+    if not headers:
+        return None
+    value = next((v for k, v in headers.items() if k.lower() == "authorization"), None)
+    if not value or not value.lower().startswith("bearer "):
+        return None
+    return value[len("bearer ") :].strip() or None
 
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):

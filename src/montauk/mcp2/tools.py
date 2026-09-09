@@ -18,7 +18,6 @@ from mcp.server.mcpserver import Context, MCPServer
 from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.orm import Session
 
-from ..auth import extract_bearer_token
 from ..dates import Birthday
 from ..db import mapping
 from ..db import models as orm
@@ -32,6 +31,7 @@ from ..db.repositories import (
 )
 from ..errors import MontaukValidationError, NotFoundError, PermissionDeniedError
 from ..exporters.markdown import person_to_markdown
+from ..ids import normalize_alias
 from ..models import Fact, Interaction, Person
 from ..person_context import DETAIL_LEVELS, build_person_context
 from ..schema import CATEGORIES
@@ -56,11 +56,48 @@ from ..tool_types import (
     UpdateSummaryOp,
     WriteResult,
 )
-from ..tools_core import _person_core, apply_name_update
+from .auth import extract_bearer_token
 from .context import Mcp2Context
 
 READ = "memory_read"
 WRITE = "memory_write"
+
+
+def _person_core(person: Person) -> PersonCore:
+    return PersonCore(
+        id=person.id,
+        name=person.name,
+        aliases=person.aliases,
+        birthday=person.birthday.to_string() if person.birthday else None,
+        location=person.location,
+        company=person.company,
+        job_title=person.job_title,
+        desired_contact_cadence_days=person.desired_contact_cadence_days,
+        summary=person.summary,
+        contact=person.contact,
+    )
+
+
+def _apply_name_update(
+    person: Person,
+    *,
+    name: str,
+    retain_previous_as_alias: bool,
+    aliases_to_add: list[str],
+    aliases_to_remove: list[str],
+) -> Person:
+    """Return a new, freshly validated Person with a changed display name.
+    The previous name is kept as an alias by default; alias normalization
+    and current-name exclusion are handled by the Person model."""
+    remove_keys = {normalize_alias(a) for a in aliases_to_remove}
+    new_aliases = [a for a in person.aliases if normalize_alias(a) not in remove_keys]
+    if retain_previous_as_alias and normalize_alias(person.name) != normalize_alias(name):
+        new_aliases.append(person.name)
+    new_aliases.extend(aliases_to_add)
+    try:
+        return Person(**{**person.model_dump(), "name": name, "aliases": new_aliases})
+    except PydanticValidationError as exc:
+        raise MontaukValidationError(str(exc)) from exc
 
 
 @asynccontextmanager
@@ -175,7 +212,7 @@ def _op_update_summary(repo: PeopleRepository, row: orm.Person, op: UpdateSummar
 
 def _op_set_name(repo: PeopleRepository, row: orm.Person, op: SetNameOp) -> list[str]:
     domain = mapping.person_to_domain(row)
-    updated = apply_name_update(
+    updated = _apply_name_update(
         domain,
         name=op.name,
         retain_previous_as_alias=op.retain_previous_as_alias,

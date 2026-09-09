@@ -21,12 +21,9 @@ jobs:
       - run: uv sync --locked
       - name: Ruff lint
         run: uv run ruff check .
-      - name: Ruff format (Phase 2 modules)
-        run: >
-          uv run ruff format --check
-          src/montauk/db src/montauk/services src/montauk/web
-          src/montauk/exporters tests/phase2
-      - name: Mypy (Phase 2 modules)
+      - name: Ruff format
+        run: uv run ruff format --check
+      - name: Mypy
         run: uv run mypy
 
   test:

@@ -1,13 +1,13 @@
 # Serving the dashboard and the MCP server on one hostname
 
-The Phase 2 dashboard and the Phase 1 MCP server are two separate processes on
-two loopback ports. They can share a single public hostname by routing on the
-URL path in the reverse proxy — the MCP transport lives entirely under `/mcp`,
-and the dashboard uses every other path.
+`montauk dashboard` and `montauk mcp` are two separate processes on two loopback
+ports. They can share a single public hostname by routing on the URL path in the
+reverse proxy — the MCP transport lives entirely under `/mcp`, and the dashboard
+uses every other path.
 
 | URL | Serves | Loopback port |
 | --- | --- | --- |
-| `https://montauk.example.com/mcp` | MCP streamable-HTTP transport (agents) | 8765 |
+| `https://montauk.example.com/mcp` | MCP streamable-HTTP transport (agents) | 8766 |
 | `https://montauk.example.com/` (everything else) | Web dashboard (browser) | 8817 |
 
 ## Caddy
@@ -20,7 +20,7 @@ montauk.example.com {
 
 	# Agents connect here; keep the bearer-token auth, no basicauth.
 	handle /mcp* {
-		reverse_proxy 127.0.0.1:8765 {
+		reverse_proxy 127.0.0.1:8766 {
 			header_up X-Real-IP {remote_host}
 		}
 	}
@@ -52,9 +52,9 @@ ExecStart=/path/to/.venv/bin/montauk dashboard --host 127.0.0.1 --port 8817 --be
 
 (or set `MONTAUK_DASHBOARD_SECURE_COOKIES=1` in the environment file).
 
-Nothing about the MCP server changes. `transport.public_url` stays
-`https://montauk.example.com`; the transport already accepts that forwarded
-Host header.
+The MCP server (`montauk mcp`) needs nothing special for the proxy: it runs with
+the Host/Origin allowlist off (the bearer-token gate is what secures it), so it
+accepts the forwarded Host header as-is.
 
 ### If you use the `claude` / `codex` CLI LLM provider
 

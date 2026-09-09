@@ -44,6 +44,7 @@ dev = [
     "pytest-asyncio>=0.24",
     "ruff>=0.16.6",
     "testcontainers[postgres]>=4.15.0",
+    "types-PyYAML>=6.0",
 ]
 
 [tool.pytest.ini_options]
@@ -69,8 +70,10 @@ ignore = ["UP042"]
 # Runtime support is still >=3.11 -- ruff (target py311) and the CI 3.11 job
 # guard against actually using 3.12-only syntax in our code.
 python_version = "3.12"
-# Phase 2 modules are typed from the start; extending strict typing to the
-# Phase 1 modules is tracked separately (ADR 0001).
+# The service layer is fully typed. person_context.py / semantic_index.py
+# (the shared retrieval engine, carried over from Phase 1) are checked
+# transitively but not held to disallow_untyped_defs yet -- tracked
+# separately (ADR 0001).
 files = [
     "src/montauk/db",
     "src/montauk/services",
@@ -78,7 +81,7 @@ files = [
     "src/montauk/web",
     "src/montauk/llm",
     "src/montauk/mcp2",
-    "src/montauk/phase2_migration.py",
+    "src/montauk/cli.py",
     "src/montauk/cli_phase2.py",
 ]
 plugins = []

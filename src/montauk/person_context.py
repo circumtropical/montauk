@@ -36,7 +36,85 @@ _PRESENT_STATE_SECTIONS = {"Interests", "Work & Education", "Relationship with U
 _WORD_RE = re.compile(r"[A-Za-z][A-Za-z'\-]+|\d{4}(?:-\d{2}){0,2}")
 _QUOTED_RE = re.compile(r"[\"“‘']([^\"”’']{2,})[\"”’']")
 _STOPWORDS = frozenset(
-    ["a", "an", "the", "and", "or", "but", "if", "is", "are", "was", "were", "be", "been", "being", "to", "of", "in", "on", "at", "for", "with", "about", "what", "who", "whom", "whose", "when", "where", "why", "how", "do", "does", "did", "i", "you", "he", "she", "they", "we", "me", "my", "your", "his", "her", "their", "our", "this", "that", "these", "those", "good", "give", "tell", "remind", "know", "think", "would", "could", "should", "have", "has", "had", "get", "got", "make", "made", "take", "see", "say", "said", "really", "very", "just", "from", "as", "it", "its"]
+    [
+        "a",
+        "an",
+        "the",
+        "and",
+        "or",
+        "but",
+        "if",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "to",
+        "of",
+        "in",
+        "on",
+        "at",
+        "for",
+        "with",
+        "about",
+        "what",
+        "who",
+        "whom",
+        "whose",
+        "when",
+        "where",
+        "why",
+        "how",
+        "do",
+        "does",
+        "did",
+        "i",
+        "you",
+        "he",
+        "she",
+        "they",
+        "we",
+        "me",
+        "my",
+        "your",
+        "his",
+        "her",
+        "their",
+        "our",
+        "this",
+        "that",
+        "these",
+        "those",
+        "good",
+        "give",
+        "tell",
+        "remind",
+        "know",
+        "think",
+        "would",
+        "could",
+        "should",
+        "have",
+        "has",
+        "had",
+        "get",
+        "got",
+        "make",
+        "made",
+        "take",
+        "see",
+        "say",
+        "said",
+        "really",
+        "very",
+        "just",
+        "from",
+        "as",
+        "it",
+        "its",
+    ]
 )
 
 _TEMPORAL_HINTS = re.compile(
@@ -407,9 +485,7 @@ def dedupe(units: list[ContextUnit], *, near_threshold: float = 0.85) -> list[Co
         u_tokens = _tokens(unit.text)
         dup = False
         for prior in kept:
-            if prior.kind != unit.kind and not (
-                {prior.kind, unit.kind} <= {"fact", "relationship"}
-            ):
+            if prior.kind != unit.kind and not ({prior.kind, unit.kind} <= {"fact", "relationship"}):
                 continue
             p_tokens = _tokens(prior.text)
             union = u_tokens | p_tokens
@@ -517,9 +593,7 @@ class PersonContextResult:
             "person": {"id": self.person_id, "name": self.person_name},
             "purpose": self.purpose,
             "detail_level": self.detail_level,
-            "summary": (
-                {"id": self.summary.record_id, "text": self.summary.text} if self.summary else None
-            ),
+            "summary": ({"id": self.summary.record_id, "text": self.summary.text} if self.summary else None),
             "facts": [self._fact_payload(u) for u in self.facts],
             "relationships": [self._fact_payload(u) for u in self.relationships],
             "interactions": [self._interaction_payload(u) for u in self.interactions],
@@ -555,9 +629,8 @@ def build_person_context(
     now = now or dt.date.today()
     analysis = analyze_purpose(purpose, subject_name=person.name)
     units = build_units(person)
-    narrow_lexical = (
-        analysis.has_lexical_query
-        and not (detail_level == "comprehensive" or analysis.is_briefing or analysis.wants_present_state)
+    narrow_lexical = analysis.has_lexical_query and not (
+        detail_level == "comprehensive" or analysis.is_briefing or analysis.wants_present_state
     )
 
     lex = lexical_scores(units, analysis) if lexical_enabled else {}
@@ -621,9 +694,7 @@ def build_person_context(
     # A narrow exact lookup can skip the person summary when the summary
     # itself wasn't a match (spec: omit it when it would just spend budget).
     if not keep_all and not analysis.wants_present_state:
-        relevant = [
-            u for u in relevant if not (u.kind == "summary" and u.lexical == 0 and u.semantic == 0)
-        ]
+        relevant = [u for u in relevant if not (u.kind == "summary" and u.lexical == 0 and u.semantic == 0)]
 
     selected: list[ContextUnit] = []
     used = 0
@@ -670,9 +741,7 @@ def build_person_context(
     )
 
 
-def _temporal_block(
-    person: Person, analysis: PurposeAnalysis, detail_level: str, now: dt.date
-) -> dict:
+def _temporal_block(person: Person, analysis: PurposeAnalysis, detail_level: str, now: dt.date) -> dict:
     if not (analysis.is_temporal or detail_level == "comprehensive"):
         return {}
     last = person.last_interaction_date()

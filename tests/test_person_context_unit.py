@@ -2,11 +2,10 @@
 person_context.py -- no MCP, no embeddings."""
 
 import datetime as dt
-from pathlib import Path
 
 import pytest
+from _people import priya as _priya
 
-from montauk.markdown_store import markdown_to_person
 from montauk.models import Fact, Interaction, Person
 from montauk.person_context import (
     ContextUnit,
@@ -17,13 +16,12 @@ from montauk.person_context import (
     lexical_scores,
 )
 
-FIXTURE = Path(__file__).parent.parent / "examples" / "dating" / "people" / "P0001.md"
 NOW = dt.date(2026, 9, 5)
 
 
 @pytest.fixture(scope="module")
 def priya() -> Person:
-    return markdown_to_person(FIXTURE.read_text(), source_path=str(FIXTURE))
+    return _priya()
 
 
 class TestAnalyzePurpose:
@@ -103,15 +101,32 @@ class TestDedupe:
 
     def test_keeps_distinct_evidence(self):
         units = [
-            ContextUnit(kind="fact", record_id="fact-1", text="She moved here in 2025 after a breakup.", score=0.9),
-            ContextUnit(kind="interaction", record_id="int-1", text="We talked about her recent move and her dogs.", score=0.8),
+            ContextUnit(
+                kind="fact", record_id="fact-1", text="She moved here in 2025 after a breakup.", score=0.9
+            ),
+            ContextUnit(
+                kind="interaction",
+                record_id="int-1",
+                text="We talked about her recent move and her dogs.",
+                score=0.8,
+            ),
         ]
         assert len(dedupe(units)) == 2
 
     def test_collapses_near_duplicate_facts_without_merging_text(self):
         units = [
-            ContextUnit(kind="fact", record_id="fact-1", text="Priya likes sour beers and cannot stand IPAs.", score=0.9),
-            ContextUnit(kind="fact", record_id="fact-2", text="Priya likes sour beers and cannot stand IPAs really.", score=0.4),
+            ContextUnit(
+                kind="fact",
+                record_id="fact-1",
+                text="Priya likes sour beers and cannot stand IPAs.",
+                score=0.9,
+            ),
+            ContextUnit(
+                kind="fact",
+                record_id="fact-2",
+                text="Priya likes sour beers and cannot stand IPAs really.",
+                score=0.4,
+            ),
         ]
         kept = dedupe(units)
         assert len(kept) == 1
@@ -120,22 +135,26 @@ class TestDedupe:
 
 class TestBudgetAndSelection:
     def test_respects_token_budget(self, priya):
-        r = build_person_context(priya, "Tell me everything about Priya", detail_level="comprehensive",
-                                 budget_tokens=200, now=NOW)
+        r = build_person_context(
+            priya, "Tell me everything about Priya", detail_level="comprehensive", budget_tokens=200, now=NOW
+        )
         assert r.approximate_tokens <= 200 or r.returned_items == 1
         assert r.truncated is True
         assert r.additional_matching_items > 0
 
     def test_explicit_budget_overrides_preset(self, priya):
-        small = build_person_context(priya, "briefing on Priya", detail_level="comprehensive",
-                                     budget_tokens=120, now=NOW)
-        big = build_person_context(priya, "briefing on Priya", detail_level="comprehensive",
-                                   budget_tokens=6000, now=NOW)
+        small = build_person_context(
+            priya, "briefing on Priya", detail_level="comprehensive", budget_tokens=120, now=NOW
+        )
+        big = build_person_context(
+            priya, "briefing on Priya", detail_level="comprehensive", budget_tokens=6000, now=NOW
+        )
         assert small.returned_items < big.returned_items
 
     def test_narrow_lookup_is_compact(self, priya):
-        r = build_person_context(priya, "What was Priya's dog's name?", detail_level="standard",
-                                 budget_tokens=2000, now=NOW)
+        r = build_person_context(
+            priya, "What was Priya's dog's name?", detail_level="standard", budget_tokens=2000, now=NOW
+        )
         assert r.returned_items <= 4
         ids = [u.record_id for u in r.facts]
         assert "fact-5" in ids  # the dog fact
@@ -144,22 +163,33 @@ class TestBudgetAndSelection:
         assert "dog" in blob
 
     def test_narrow_lookup_omits_summary_when_summary_not_a_match(self, priya):
-        r = build_person_context(priya, "What was Priya's dog's name?", detail_level="standard",
-                                 budget_tokens=2000, now=NOW)
+        r = build_person_context(
+            priya, "What was Priya's dog's name?", detail_level="standard", budget_tokens=2000, now=NOW
+        )
         assert r.summary is None
 
     def test_identity_purpose_includes_summary(self, priya):
-        r = build_person_context(priya, "Remind me who Priya is and how I know her", detail_level="standard",
-                                 budget_tokens=2000, now=NOW)
+        r = build_person_context(
+            priya,
+            "Remind me who Priya is and how I know her",
+            detail_level="standard",
+            budget_tokens=2000,
+            now=NOW,
+        )
         assert r.summary is not None
 
 
 class TestTemporal:
     def test_temporal_block_only_for_temporal_or_comprehensive(self, priya):
-        assert build_person_context(priya, "What are her interests?", detail_level="standard",
-                                    budget_tokens=2000, now=NOW).temporal == {}
-        t = build_person_context(priya, "How long since I last saw Priya?", detail_level="standard",
-                                 budget_tokens=2000, now=NOW).temporal
+        assert (
+            build_person_context(
+                priya, "What are her interests?", detail_level="standard", budget_tokens=2000, now=NOW
+            ).temporal
+            == {}
+        )
+        t = build_person_context(
+            priya, "How long since I last saw Priya?", detail_level="standard", budget_tokens=2000, now=NOW
+        ).temporal
         assert t["last_recorded_interaction"] == "2026-08-27"
         assert t["days_since_last_recorded_interaction"] == 9
         assert t["supporting_interaction_id"] == "int-3"
@@ -170,22 +200,29 @@ class TestTemporal:
             name="X",
             interactions=[Interaction(id="int-1", date="2026", summary="met once")],
         )
-        t = build_person_context(person, "how long since we spoke", detail_level="standard",
-                                 budget_tokens=2000, now=NOW).temporal
+        t = build_person_context(
+            person, "how long since we spoke", detail_level="standard", budget_tokens=2000, now=NOW
+        ).temporal
         assert t["days_since_last_recorded_interaction"] is None
         assert "not full-precision" in t["note"]
 
     def test_no_subjective_conclusions(self, priya):
-        t = build_person_context(priya, "have I waited too long to reach out?", detail_level="standard",
-                                 budget_tokens=2000, now=NOW).temporal
+        t = build_person_context(
+            priya,
+            "have I waited too long to reach out?",
+            detail_level="standard",
+            budget_tokens=2000,
+            now=NOW,
+        ).temporal
         assert "waited_too_long" not in t
         assert not any(isinstance(v, bool) for v in t.values())
 
 
 class TestSerialization:
     def test_omits_default_high_confidence_includes_low(self, priya):
-        r = build_person_context(priya, "is she learning any instruments", detail_level="standard",
-                                 budget_tokens=2000, now=NOW)
+        r = build_person_context(
+            priya, "is she learning any instruments", detail_level="standard", budget_tokens=2000, now=NOW
+        )
         payload = r.to_payload()
         by_id = {f["id"]: f for f in payload["facts"]}
         assert "fact-14" in by_id  # banjo, confidence: low
@@ -194,18 +231,29 @@ class TestSerialization:
             assert f.get("confidence") != "high"
 
     def test_no_storage_metadata_in_payload(self, priya):
-        payload = build_person_context(priya, "briefing", detail_level="comprehensive",
-                                       budget_tokens=6000, now=NOW).to_payload()
+        payload = build_person_context(
+            priya, "briefing", detail_level="comprehensive", budget_tokens=6000, now=NOW
+        ).to_payload()
         blob = repr(payload)
-        for banned in ("content_hash", "embedding", "chunk_id", "row_index", "file_path", ".md", "created_at", "updated_at"):
+        for banned in (
+            "content_hash",
+            "embedding",
+            "chunk_id",
+            "row_index",
+            "file_path",
+            ".md",
+            "created_at",
+            "updated_at",
+        ):
             assert banned not in blob
         for f in payload["facts"]:
             assert set(f) <= {"id", "text", "section", "date", "confidence", "related_person_id"}
         assert "id" in payload["person"] and "name" in payload["person"]
 
     def test_relationship_surfaces_related_person_id(self, priya):
-        payload = build_person_context(priya, "who introduced us / how did we meet", detail_level="standard",
-                                       budget_tokens=2000, now=NOW).to_payload()
+        payload = build_person_context(
+            priya, "who introduced us / how did we meet", detail_level="standard", budget_tokens=2000, now=NOW
+        ).to_payload()
         rels = {r["id"]: r for r in payload["relationships"]}
         assert "fact-2" in rels
         assert rels["fact-2"]["related_person_id"] == "P0002"
@@ -213,8 +261,14 @@ class TestSerialization:
 
 class TestNoSemantic:
     def test_lexical_only_when_no_index(self, priya):
-        r = build_person_context(priya, "What did Priya say at the top of the tower?", detail_level="standard",
-                                 budget_tokens=2000, semantic_index=None, now=NOW)
+        r = build_person_context(
+            priya,
+            "What did Priya say at the top of the tower?",
+            detail_level="standard",
+            budget_tokens=2000,
+            semantic_index=None,
+            now=NOW,
+        )
         assert r.semantic_available is False
         assert r.semantic_note
         ids = [u.record_id for u in r.facts]
@@ -229,6 +283,12 @@ class TestNoSemantic:
                 Fact(id="fact-2", category="Work & Education", text="Priya is a nurse."),
             ],
         )
-        r = build_person_context(person, "does Priya play any instruments?", detail_level="standard",
-                                 budget_tokens=2000, semantic_index=None, now=NOW)
+        r = build_person_context(
+            person,
+            "does Priya play any instruments?",
+            detail_level="standard",
+            budget_tokens=2000,
+            semantic_index=None,
+            now=NOW,
+        )
         assert [u.record_id for u in r.facts] == ["fact-1"]

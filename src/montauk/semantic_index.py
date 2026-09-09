@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Self
@@ -30,7 +31,6 @@ import numpy as np
 
 from .embeddings.base import EmbeddingProvider
 from .models import Person
-from .reconciliation import ScanResult
 from .tokens import estimate_tokens, split_sentences
 
 logger = logging.getLogger(__name__)
@@ -170,9 +170,7 @@ def chunk_person(
         total = len(pieces)
         for idx, piece in enumerate(pieces):
             chunk_id = (
-                f"{person.id}:{interaction.id}"
-                if total == 1
-                else f"{person.id}:{interaction.id}#{idx}"
+                f"{person.id}:{interaction.id}" if total == 1 else f"{person.id}:{interaction.id}#{idx}"
             )
             chunks.append(
                 Chunk(
@@ -196,7 +194,16 @@ def _cosine_similarity(query_vector: np.ndarray, matrix: np.ndarray) -> np.ndarr
     return matrix_norms @ query_norm
 
 
-_CHUNK_COLUMNS = ("row_index", "chunk_id", "person_id", "chunk_type", "local_id", "chunk_index", "chunk_total", "text")
+_CHUNK_COLUMNS = (
+    "row_index",
+    "chunk_id",
+    "person_id",
+    "chunk_type",
+    "local_id",
+    "chunk_index",
+    "chunk_total",
+    "text",
+)
 
 
 class SemanticIndex:
@@ -228,15 +235,15 @@ class SemanticIndex:
         person_meta table. The index is derived, so the safe migration is
         to drop the stale physical tables and let startup reconciliation
         repopulate them from canonical Markdown."""
-        existing = {
-            r[0] for r in self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")
-        }
+        existing = {r[0] for r in self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         if "chunks" not in existing:
             return
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(chunks)")}
         if {"chunk_index", "chunk_total"} <= cols and "person_meta" in existing:
             return
-        logger.warning("semantic index chunks.sqlite is a pre-v%s schema; dropping for rebuild", SCHEMA_VERSION)
+        logger.warning(
+            "semantic index chunks.sqlite is a pre-v%s schema; dropping for rebuild", SCHEMA_VERSION
+        )
         self._conn.execute("DROP TABLE IF EXISTS chunks")
         self._conn.execute("DROP TABLE IF EXISTS person_meta")
         self._conn.execute("DELETE FROM vector_meta")
@@ -373,14 +380,15 @@ class SemanticIndex:
             ],
         )
 
-    def rebuild_from_scan(self, scan_result: ScanResult, *, content_hashes: dict[str, str] | None = None) -> None:
-        """Full rebuild from an already-validated scan. `content_hashes`
-        (person_id -> canonical file hash) lets readers detect drift; when
-        omitted, person_meta rows are still written but with a sentinel."""
+    def rebuild(self, people: Mapping[str, Person], *, content_hashes: dict[str, str] | None = None) -> None:
+        """Full rebuild from an already-validated ``{person_id: Person}`` map.
+        `content_hashes` (person_id -> canonical record hash) lets readers
+        detect drift; when omitted, person_meta rows are still written but
+        with a sentinel."""
         content_hashes = content_hashes or {}
         all_chunks: list[Chunk] = []
-        for person_id in sorted(scan_result.valid):
-            all_chunks.extend(self._chunk_person(scan_result.valid[person_id]))
+        for person_id in sorted(people):
+            all_chunks.extend(self._chunk_person(people[person_id]))
 
         if all_chunks:
             matrix = np.array(self.embedding_provider.embed([c.text for c in all_chunks]), dtype="float32")
@@ -390,7 +398,7 @@ class SemanticIndex:
         self._conn.execute("DELETE FROM chunks")
         self._conn.execute("DELETE FROM person_meta")
         self._insert_chunks(all_chunks, 0)
-        for person_id in scan_result.valid:
+        for person_id in people:
             self._conn.execute(
                 "INSERT INTO person_meta (person_id, content_hash) VALUES (?, ?)",
                 (person_id, content_hashes.get(person_id, "unknown")),
@@ -416,7 +424,9 @@ class SemanticIndex:
         self._conn.execute("DELETE FROM chunks WHERE person_id = ?", (person_id,))
         remaining = self._conn.execute("SELECT chunk_id FROM chunks ORDER BY row_index").fetchall()
         for new_index, row in enumerate(remaining):
-            self._conn.execute("UPDATE chunks SET row_index = ? WHERE chunk_id = ?", (new_index, row["chunk_id"]))
+            self._conn.execute(
+                "UPDATE chunks SET row_index = ? WHERE chunk_id = ?", (new_index, row["chunk_id"])
+            )
         self._conn.commit()
         self._save()
 
@@ -443,7 +453,9 @@ class SemanticIndex:
 
     # -- search --------------------------------------------------------
 
-    def _row_matches(self, rows: list, scores: np.ndarray, *, limit: int, threshold: float) -> list[SemanticMatch]:
+    def _row_matches(
+        self, rows: list, scores: np.ndarray, *, limit: int, threshold: float
+    ) -> list[SemanticMatch]:
         order = np.argsort(-scores)
         matches: list[SemanticMatch] = []
         for idx in order:

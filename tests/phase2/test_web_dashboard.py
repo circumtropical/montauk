@@ -7,10 +7,9 @@ import pytest
 
 from montauk.db.repositories import Actor, PeopleRepository, WorkspaceScope
 from montauk.models import Fact, Interaction, Person
-from montauk.phase2_migration import run_migration
 from montauk.services.workspace import get_or_create_workspace
 
-from ._phase1_fixtures import write_golden
+from ._golden import seed_golden
 
 OWNER = {
     "email": "owner@example.com",
@@ -120,16 +119,8 @@ class TestWithMigratedData:
     @pytest.fixture
     def populated(self, client, session_maker, tmp_path):
         _setup_owner(client)
-        src = write_golden(tmp_path / "p1")
-        # migrate into the same workspace slug the wizard created ("personal")
-        report = run_migration(
-            session_maker,
-            source_dir=src,
-            workspace_name="Personal",
-            mode="execute",
-            make_backup=False,
-        )
-        assert report.status == "succeeded"
+        # seed into the same workspace the wizard created ("Personal")
+        seed_golden(session_maker, workspace_name="Personal")
         return client
 
     def test_home_shows_people_count_and_birthdays(self, populated):
@@ -450,18 +441,6 @@ class TestSettings:
         logged_in.post(f"/settings/agents/{cid_match.group(1)}/revoke", data={"_csrf": csrf})
         assert "revoked" in logged_in.get("/settings").text
 
-    def test_migration_diagnostics_visible(self, client, session_maker, tmp_path):
-        _setup_owner(client)
-        run_migration(
-            session_maker,
-            source_dir=write_golden(tmp_path / "p1"),
-            workspace_name="Personal",
-            mode="execute",
-            make_backup=False,
-        )
-        html = client.get("/settings").text
-        assert "succeeded" in html
-
     def test_settings_fields_are_editable_forms(self, logged_in):
         html = logged_in.get("/settings").text
         assert 'action="/settings/workspace"' in html
@@ -684,13 +663,7 @@ class TestLLMDashboard:
     def test_generate_summary_without_a_model_returns_deterministic_evidence(
         self, logged_in, session_maker, tmp_path
     ):
-        run_migration(
-            session_maker,
-            source_dir=write_golden(tmp_path / "p1"),
-            workspace_name="Personal",
-            mode="execute",
-            make_backup=False,
-        )
+        seed_golden(session_maker, workspace_name="Personal")
         csrf = _csrf(logged_in, "/people/P0001")
         r = logged_in.post(
             "/people/P0001/summary",
@@ -703,13 +676,7 @@ class TestLLMDashboard:
         from montauk.llm.providers.fake import FakeProvider
         from montauk.services import briefing
 
-        run_migration(
-            session_maker,
-            source_dir=write_golden(tmp_path / "p1"),
-            workspace_name="Personal",
-            mode="execute",
-            make_backup=False,
-        )
+        seed_golden(session_maker, workspace_name="Personal")
         csrf = _csrf(logged_in, "/settings")
         logged_in.post(
             "/settings/model/summarization",
@@ -736,13 +703,7 @@ class TestLLMDashboard:
         assert "1</strong> calls" in logged_in.get("/settings").text
 
     def test_summary_requires_a_purpose(self, logged_in, session_maker, tmp_path):
-        run_migration(
-            session_maker,
-            source_dir=write_golden(tmp_path / "p1"),
-            workspace_name="Personal",
-            mode="execute",
-            make_backup=False,
-        )
+        seed_golden(session_maker, workspace_name="Personal")
         csrf = _csrf(logged_in, "/people/P0001")
         r = logged_in.post("/people/P0001/summary", data={"_csrf": csrf, "purpose": " "})
         assert r.status_code == 400
