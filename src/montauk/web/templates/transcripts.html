@@ -2,12 +2,58 @@
 {% block title %}Transcripts &middot; Montauk{% endblock %}
 {% block body %}
   <h1>Transcripts</h1>
+
   <div class="card">
-    <p class="muted">
-      No inbound connectors are configured in this build. Once WhatsApp, Google
-      Messages, Gmail, or IMAP are connected (a later increment), enabled
-      conversations are archived here with full-text search, per-message
-      provenance, and deletion controls.
-    </p>
+    <h2>Import a WhatsApp export</h2>
+    {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+    {% if extraction_configured %}
+      <p class="muted">In WhatsApp: open the chat &rarr; <em>Export chat</em> &rarr; <em>Without media</em>, and
+        upload the resulting <code>.txt</code>. Every message is archived; anything new since the last
+        import of this chat is sent to the extraction model, which adds facts and a per-day interaction
+        summary for the people you map. Re-importing the same file does nothing.</p>
+      <form method="post" action="/transcripts/import" enctype="multipart/form-data" class="searchbar">
+        <input type="hidden" name="_csrf" value="{{ csrf }}">
+        <div style="flex:1 1 20rem">
+          <label for="wa-file">WhatsApp chat export (.txt, without media)</label>
+          <input type="file" id="wa-file" name="file" accept=".txt,text/plain" required>
+        </div>
+        <button type="submit">Import &amp; extract</button>
+      </form>
+    {% else %}
+      <div class="notice">
+        <strong>An extraction model is required.</strong> Importing a transcript runs the
+        <em>extraction</em> model over the new messages to add facts automatically, so this is disabled
+        until one is set up. Configure it in
+        <a href="/settings">Settings &rarr; Model &amp; provider</a> (the &ldquo;Extraction model&rdquo; block),
+        then come back.
+      </div>
+      <p class="muted"><input type="file" disabled> &nbsp;<button type="button" disabled>Import &amp; extract</button></p>
+    {% endif %}
   </div>
+
+  {% if threads %}
+  <div class="card">
+    <h2>Imported conversations</h2>
+    <div class="scroll-x">
+    <table>
+      <thead><tr><th>Conversation</th><th>Messages</th><th>Pending</th><th>Mapped</th><th>Last message</th><th></th></tr></thead>
+      <tbody>
+      {% for t in threads %}
+        <tr>
+          <td><a href="/transcripts/{{ t.id }}">{{ t.title }}</a>
+            <div class="muted">{{ t.participants|length }} participant{{ 's' if t.participants|length != 1 }}</div></td>
+          <td>{{ t.total_messages }}</td>
+          <td>{% if t.awaiting_processing %}<strong>{{ t.awaiting_processing }}</strong>{% else %}0{% endif %}</td>
+          <td>{{ t.mapped_people }} / {{ t.participants|length }}</td>
+          <td>{{ t.last_at.strftime('%Y-%m-%d') if t.last_at else '&mdash;' }}</td>
+          <td><a href="/transcripts/{{ t.id }}">open</a></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+  {% else %}
+    <p class="muted">No transcripts imported yet.</p>
+  {% endif %}
 {% endblock %}

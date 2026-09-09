@@ -42,6 +42,19 @@
     });
   });
 
+  // Transcripts › participant mapping: only show the person picker when the
+  // role is "a person". Without JS both selects are always visible.
+  document.querySelectorAll("select[data-participant-role]").forEach(function (roleSel) {
+    var personSel = roleSel.form && roleSel.form.querySelector("select[data-participant-person]");
+    if (!personSel) return;
+    var wrap = personSel.parentNode;
+    function sync() {
+      wrap.hidden = roleSel.value !== "person";
+    }
+    roleSel.addEventListener("change", sync);
+    sync();
+  });
+
   // Settings › Model & provider: the provider choice drives everything, so
   // show only the fields that provider needs and match the model suggestions
   // to it. Without JS every field is visible (the form still works).

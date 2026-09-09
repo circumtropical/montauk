@@ -1,0 +1,102 @@
+{% extends "base.html" %}
+{% block title %}{{ view.title }} &middot; Transcripts{% endblock %}
+{% block body %}
+  <p class="muted"><a href="/transcripts">&larr; Transcripts</a></p>
+  <h1>{{ view.title }}</h1>
+  <p class="muted">
+    {{ view.total_messages }} message{{ 's' if view.total_messages != 1 }} &middot;
+    {{ view.processed }} extracted &middot;
+    {% if view.awaiting_processing %}<strong>{{ view.awaiting_processing }} pending</strong>{% else %}0 pending{% endif %}
+    {%- if view.first_at %} &middot; {{ view.first_at.strftime('%Y-%m-%d') }} to {{ view.last_at.strftime('%Y-%m-%d') }}{% endif %}
+  </p>
+
+  {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+  {% if just_imported %}<div class="notice">Import complete. Map any unmapped participants below, then run extraction.</div>{% endif %}
+  {% if extraction_result %}<div class="notice"><strong>Extraction:</strong> {{ extraction_result }}</div>{% endif %}
+
+  <div class="card">
+    <h2>Participants</h2>
+    <p class="muted">Tell Montauk who each sender is. Facts are only extracted about participants
+      mapped to a person; the owner's messages are used as context. Unmapped and ignored senders
+      contribute nothing.</p>
+    <div class="scroll-x">
+    <table>
+      <thead><tr><th>Sender</th><th>Messages</th><th>Is</th><th></th></tr></thead>
+      <tbody>
+      {% for p in view.participants %}
+        <tr>
+          <td>{{ p.display_name }}</td>
+          <td>{{ p.message_count }}</td>
+          <td>
+            {% if p.role == 'person' %}<a href="/people/{{ p.person_public_id }}">{{ p.person_name }} ({{ p.person_public_id }})</a>
+            {% elif p.role == 'owner' %}the owner (you)
+            {% elif p.role == 'ignored' %}<span class="muted">ignored</span>
+            {% else %}<span class="pill">unmapped</span>{% endif %}
+          </td>
+          <td>
+            <form method="post" action="/transcripts/{{ view.id }}/participants" class="searchbar" style="margin:0">
+              <input type="hidden" name="_csrf" value="{{ csrf }}">
+              <input type="hidden" name="participant_id" value="{{ p.id }}">
+              <div style="flex:0 0 8rem"><select name="role" data-participant-role>
+                <option value="unmapped" {{ 'selected' if p.role == 'unmapped' }}>&mdash;</option>
+                <option value="owner" {{ 'selected' if p.role == 'owner' }}>the owner</option>
+                <option value="person" {{ 'selected' if p.role == 'person' }}>a person</option>
+                <option value="ignored" {{ 'selected' if p.role == 'ignored' }}>ignore</option>
+              </select></div>
+              <div style="flex:1 1 12rem"><select name="person_id" data-participant-person>
+                <option value="">(pick a person)</option>
+                {% for person in people %}
+                <option value="{{ person.public_id }}" {{ 'selected' if p.person_public_id == person.public_id }}>{{ person.name }} ({{ person.public_id }})</option>
+                {% endfor %}
+              </select></div>
+              <button type="submit" class="secondary">Save</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Extraction</h2>
+    {% if not extraction_configured %}
+      <div class="notice"><strong>No extraction model configured.</strong>
+        Set one in <a href="/settings">Settings &rarr; Model &amp; provider</a> to process the
+        {{ view.awaiting_processing }} pending message{{ 's' if view.awaiting_processing != 1 }}.</div>
+    {% elif view.mapped_people == 0 %}
+      <p class="muted">Map at least one participant to a person above, then extraction can run.</p>
+    {% elif view.awaiting_processing == 0 %}
+      <p class="muted">Nothing pending &mdash; every message has been processed. Import a newer export to add more.</p>
+    {% else %}
+      <p class="muted">{{ view.awaiting_processing }} message{{ 's' if view.awaiting_processing != 1 }}
+        awaiting extraction, in day-batches. Facts are added with <em>automatically extracted</em>
+        authority (an owner or agent edit always wins). A large first run processes a capped number of
+        days &mdash; click again to continue.</p>
+      <form method="post" action="/transcripts/{{ view.id }}/extract" class="inline">
+        <input type="hidden" name="_csrf" value="{{ csrf }}">
+        <button type="submit">Run extraction ({{ view.awaiting_processing }} pending)</button>
+      </form>
+    {% endif %}
+  </div>
+
+  {% if view.recent %}
+  <div class="card">
+    <h2>Recent messages</h2>
+    <div class="scroll-x">
+      <pre style="white-space:pre-wrap">{% for m in view.recent %}[{{ m.sent_at.strftime('%Y-%m-%d %H:%M') }}] {{ m.sender_name or 'system' }}: {{ '[media omitted]' if m.media_omitted else m.text }}
+{% endfor %}</pre>
+    </div>
+  </div>
+  {% endif %}
+
+  <div class="card">
+    <h2>Danger zone</h2>
+    <form method="post" action="/transcripts/{{ view.id }}/delete" class="inline"
+          data-confirm="Delete this transcript and all {{ view.total_messages }} archived messages? Facts already extracted stay.">
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+      <button type="submit" class="danger">Delete transcript</button>
+    </form>
+  </div>
+{% endblock %}

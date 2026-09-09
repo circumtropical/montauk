@@ -70,12 +70,3 @@ def home(
         },
     )
     return TEMPLATES.TemplateResponse(request, "home.html", ctx)
-
-
-@router.get("/transcripts", response_class=HTMLResponse)
-def transcripts(request: Request, auth: AuthContext = Depends(require_auth)) -> HTMLResponse:
-    return TEMPLATES.TemplateResponse(
-        request,
-        "transcripts.html",
-        page_context(request, auth),
-    )

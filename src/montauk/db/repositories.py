@@ -384,6 +384,7 @@ class PeopleRepository:
         related_person_id: str | None = None,
         sources: list[Source] | None = None,
         reason: str | None = None,
+        authority: str = "owner_curated",
     ) -> str:
         local_id = next_fact_id(f.local_id for f in row.facts)
         fact = DomainFact.model_validate(
@@ -407,7 +408,7 @@ class PeopleRepository:
             date_text=date_text,
             date_precision=precision,
             confidence=fact.confidence.value,
-            authority="owner_curated",
+            authority=authority,
             related_person_public_id=fact.related_person_id,
             related_person_id=related_uuid,
         )
@@ -425,7 +426,7 @@ class PeopleRepository:
             field="__created__",
             old=None,
             new={"category": fact.category, "text": fact.text},
-            authority="owner_curated",
+            authority=authority,
             reason=reason,
         )
         return local_id
@@ -561,6 +562,7 @@ class PeopleRepository:
         summary: str | None = None,
         sources: list[Source] | None = None,
         reason: str | None = None,
+        authority: str = "owner_curated",
     ) -> str:
         local_id = next_interaction_id(i.local_id for i in row.interactions)
         interaction = DomainInteraction.model_validate(
@@ -583,7 +585,7 @@ class PeopleRepository:
             channel=interaction.channel,
             connection_level=interaction.connection_level,
             summary=interaction.summary,
-            authority="owner_curated",
+            authority=authority,
         )
         for s in interaction.sources:
             irow.sources.append(
@@ -599,7 +601,7 @@ class PeopleRepository:
             field="__created__",
             old=None,
             new={"date": interaction.date.to_string(), "summary": interaction.summary},
-            authority="owner_curated",
+            authority=authority,
             reason=reason,
         )
         return local_id

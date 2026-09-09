@@ -362,8 +362,10 @@ class TestWithMigratedData:
         r = self._post(populated, "/people/P0001/facts/fact-9/delete")
         assert r.status_code == 400  # LocalRecordNotFound, not a 500 or cross-tenant hit
 
-    def test_transcripts_page_shows_degraded_state(self, populated):
-        assert "No inbound connectors" in populated.get("/transcripts").text
+    def test_transcripts_page_requires_extraction_model(self, populated):
+        html = populated.get("/transcripts").text
+        assert "An extraction model is required" in html
+        assert "No transcripts imported yet" in html
 
     def test_create_person_from_directory(self, populated):
         csrf = _csrf(populated, "/people")

@@ -111,7 +111,7 @@ def create_app(
     app.add_middleware(SecurityHeadersMiddleware)
     app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")
 
-    from .routes import auth, exports, home, people, settings, setup
+    from .routes import auth, exports, home, people, settings, setup, transcripts
 
     app.include_router(setup.router)
     app.include_router(auth.router)
@@ -119,6 +119,7 @@ def create_app(
     app.include_router(people.router)
     app.include_router(exports.router)
     app.include_router(settings.router)
+    app.include_router(transcripts.router)
 
     @app.middleware("http")
     async def _guard(request: Request, call_next):  # type: ignore[no-untyped-def]

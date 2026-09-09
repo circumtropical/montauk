@@ -81,8 +81,7 @@
   </p>
   {% else %}
     <p class="muted">
-      {% if q %}No people match &ldquo;{{ q }}&rdquo;.{% else %}No people yet &mdash; use &ldquo;Add a person&rdquo; above,
-      or import a Phase 1 deployment with <code>montauk migrate phase2</code>.{% endif %}
+      {% if q %}No people match &ldquo;{{ q }}&rdquo;.{% else %}No people yet &mdash; use &ldquo;Add a person&rdquo; above.{% endif %}
     </p>
   {% endif %}
 {% endblock %}

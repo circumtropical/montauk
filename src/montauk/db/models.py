@@ -553,3 +553,117 @@ class LegacyMigrationRun(Base):
     report: Mapped[Any | None] = mapped_column(JSONB)
     started_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     finished_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+# --- source archive: manual transcript imports (spec 8.3, 14, 15) -------
+#
+# Messages are immutable evidence, archived before any extraction runs and
+# retained even with no LLM configured. Curated facts/interactions stay
+# separate; extraction writes them at `automatically_extracted` authority.
+
+PARTICIPANT_ROLES = ("unmapped", "owner", "person", "ignored")
+MESSAGE_STATUS_VALUES = ("awaiting_processing", "processed", "skipped")
+
+
+class SourceThread(Base, TimestampMixin):
+    """One archived conversation. `thread_key` is a stable hash of the
+    platform + the set of participant display names, so re-importing a
+    longer export of the same chat lands in the same thread."""
+
+    __tablename__ = "source_threads"
+    __table_args__ = (UniqueConstraint("workspace_id", "platform", "thread_key"),)
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    platform: Mapped[str] = mapped_column(String(32))  # "whatsapp_import"
+    thread_key: Mapped[str] = mapped_column(String(64))
+    title: Mapped[str] = mapped_column(Text)
+
+    participants: Mapped[list[SourceParticipant]] = relationship(
+        back_populates="thread", cascade="all, delete-orphan"
+    )
+    messages: Mapped[list[SourceMessage]] = relationship(
+        back_populates="thread", cascade="all, delete-orphan"
+    )
+
+
+class SourceParticipant(Base):
+    """A distinct sender name seen in a thread, and who it maps to. A human
+    confirms every mapping before extraction attaches facts (spec 13.1)."""
+
+    __tablename__ = "source_participants"
+    __table_args__ = (
+        UniqueConstraint("thread_id", "display_name_normalized"),
+        CheckConstraint("role IN " + str(PARTICIPANT_ROLES), name="role_valid"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    thread_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("source_threads.id", ondelete="CASCADE"), index=True
+    )
+    display_name: Mapped[str] = mapped_column(Text)
+    display_name_normalized: Mapped[str] = mapped_column(Text)
+    role: Mapped[str] = mapped_column(String(16), default="unmapped")
+    person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    thread: Mapped[SourceThread] = relationship(back_populates="participants")
+
+
+class SourceMessage(Base):
+    """One archived message. `fingerprint` (platform + thread + normalized
+    sender + timestamp + normalized text) is the dedup key for exports that
+    carry no message IDs (spec 15.3)."""
+
+    __tablename__ = "source_messages"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "thread_id", "fingerprint"),
+        CheckConstraint("processing_status IN " + str(MESSAGE_STATUS_VALUES), name="processing_status_valid"),
+        Index("ix_source_messages_thread_time", "workspace_id", "thread_id", "sent_at"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    thread_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("source_threads.id", ondelete="CASCADE"), index=True
+    )
+    import_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("source_imports.id", ondelete="SET NULL"))
+    fingerprint: Mapped[str] = mapped_column(String(64))
+    sender_name: Mapped[str | None] = mapped_column(Text)
+    sender_normalized: Mapped[str | None] = mapped_column(Text)
+    sent_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
+    text: Mapped[str] = mapped_column(Text)
+    is_system: Mapped[bool] = mapped_column(default=False)
+    media_omitted: Mapped[bool] = mapped_column(default=False)
+    processing_status: Mapped[str] = mapped_column(String(24), default="awaiting_processing")
+    ingested_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+    thread: Mapped[SourceThread] = relationship(back_populates="messages")
+
+
+class SourceImport(Base):
+    """One dashboard upload. Records the file hash + counts so a repeat
+    upload is a no-op and a later, longer export adds only its tail."""
+
+    __tablename__ = "source_imports"
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    thread_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("source_threads.id", ondelete="SET NULL"))
+    filename: Mapped[str] = mapped_column(Text)
+    file_sha256: Mapped[str] = mapped_column(String(64))
+    parser_version: Mapped[str] = mapped_column(String(16))
+    message_count: Mapped[int] = mapped_column(Integer, default=0)
+    new_message_count: Mapped[int] = mapped_column(Integer, default=0)
+    warnings: Mapped[Any | None] = mapped_column(JSONB)
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
