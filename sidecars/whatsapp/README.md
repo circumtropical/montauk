@@ -53,6 +53,17 @@ nothing as long as Montauk is up to re-`/connect` it.
 ## History depth
 
 The initial link syncs whatever history WhatsApp pushes (`syncFullHistory:
-true`) — typically several months. Deeper on-demand backfill
+true`) — typically several months, and per-conversation you choose how much of
+it to keep (last N days / N messages / everything). Deeper on-demand backfill
 (`fetchMessageHistory`) is a follow-up; the manual chat-export importer covers
 older history in the meantime.
+
+## Troubleshooting
+
+**`/threads` is empty after a restart** (logs show `init queries "Timed Out"`):
+WhatsApp only re-pushes the chat/history dump on a *fresh* pair, not on a
+resumed session. **Unlink device** then **Connect WhatsApp** again in the
+dashboard — your monitored-conversation selections survive the re-pair (they're
+matched by chat id). Do not restart the sidecar repeatedly to try to fix it;
+that used to corrupt the session (fixed in `server.js`, but re-pairing is still
+the recovery).
