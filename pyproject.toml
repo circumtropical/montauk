@@ -25,6 +25,7 @@ dependencies = [
     "argon2-cffi>=25.1.0",
     "cryptography>=50.0.1",
     "anthropic>=1.4.0",
+    "httpx>=0.27",
 ]
 
 [project.scripts]
@@ -77,6 +78,7 @@ python_version = "3.12"
 files = [
     "src/montauk/db",
     "src/montauk/services",
+    "src/montauk/connectors",
     "src/montauk/exporters",
     "src/montauk/web",
     "src/montauk/llm",

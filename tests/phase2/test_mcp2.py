@@ -293,3 +293,36 @@ class TestWrites:
             assert found["candidates"][0]["person_id"] == "P0001"
             err = await _call_error(s, "get_person", person_id="P9999")
         assert "P9999" in err
+
+
+class TestConnectorHealth:
+    async def test_reports_unconfigured_with_no_secrets(self, db_session, workspace, secret_box, mcp_url):
+        token = _token(db_session, workspace, capabilities=("memory_read",))
+        db_session.commit()
+        async with _client(mcp_url, token) as s:
+            out = await _call(s, "get_connector_health")
+        assert out["connectors"][0] == {
+            "provider": "whatsapp",
+            "status": "unconfigured",
+            "enabled_threads": 0,
+        }
+
+    async def test_reflects_a_connected_account(self, db_session, workspace, secret_box, mcp_url):
+        from montauk.db import models as orm
+
+        db_session.add(
+            orm.ConnectorAccount(
+                workspace_id=workspace.id,
+                provider="whatsapp",
+                status="connected",
+                self_phone="+15550001111",
+                encrypted_session="v1:secret",
+            )
+        )
+        token = _token(db_session, workspace, capabilities=("memory_read",))
+        db_session.commit()
+        async with _client(mcp_url, token) as s:
+            out = await _call(s, "get_connector_health")
+        health = out["connectors"][0]
+        assert health["status"] == "connected" and health["connected_as"] == "+15550001111"
+        assert "secret" not in str(out) and "encrypted_session" not in str(out)

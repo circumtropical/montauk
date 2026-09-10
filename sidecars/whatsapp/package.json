@@ -1,0 +1,20 @@
+{
+  "name": "montauk-whatsapp-sidecar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Receive-only WhatsApp linked-device bridge for Montauk (spec 11, ADR 0004). Montauk never sends through this.",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "@whiskeysockets/baileys": "^6.7.9",
+    "express": "^4.21.2",
+    "pino": "^9.5.0",
+    "qrcode": "^1.5.4"
+  }
+}

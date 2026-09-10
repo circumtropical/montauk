@@ -83,6 +83,41 @@
     sync();
   });
 
+  // Connectors › WhatsApp pairing: poll for the rotating QR code and jump to
+  // the connectors page once the phone links. Without JS the page explains
+  // that a manual reload is needed.
+  document.querySelectorAll("[data-pair-poll]").forEach(function (box) {
+    var url = box.getAttribute("data-url");
+    var img = box.querySelector("[data-pair-qr]");
+    var msg = box.querySelector("[data-pair-msg]");
+    var done = false;
+    function tick() {
+      fetch(url + "?t=" + Date.now(), {
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          if (d.state === "connected") {
+            done = true;
+            if (msg) msg.textContent = "Linked as " + (d.connected_as || "your account") + ". Redirecting…";
+            window.location = "/connectors";
+            return;
+          }
+          if (d.qr) {
+            if (img) img.src = d.qr;
+            if (msg) msg.textContent = "Scan this code with WhatsApp on your phone.";
+          } else if (msg) {
+            msg.textContent = d.error || "Waiting for a pairing code…";
+          }
+          if (!done) setTimeout(tick, 2500);
+        })
+        .catch(function () { if (!done) setTimeout(tick, 4000); });
+    }
+    tick();
+  });
+
   // Settings › Model & provider: the provider choice drives everything, so
   // show only the fields that provider needs and match the model suggestions
   // to it. Without JS every field is visible (the form still works).

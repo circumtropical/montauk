@@ -510,6 +510,20 @@ def register_mcp2_tools(server: MCPServer, ctx: Mcp2Context) -> None:
         out.sort(key=lambda o: (o.status != "never_contacted", -(o.days_since_last_interaction or 10**9)))
         return out
 
+    @server.tool(
+        description=(
+            "Health of this workspace's inbound source connectors (currently WhatsApp): connection "
+            "status, how many conversations are enabled, and when the last sync ran. Contains no "
+            "secrets and no message content. Use it to explain a stale or empty briefing "
+            "('the connector is disconnected' / 'only 2 chats are enabled')."
+        )
+    )
+    async def get_connector_health(mcp_ctx: Context) -> dict:
+        from ..connectors.service import health as _connector_health
+
+        async with _scope(ctx, mcp_ctx, capability=READ) as (session, scope):
+            return {"connectors": [_connector_health(session, scope.workspace_id)]}
+
     # ------------------------------------------------------------------
     # Writes
     # ------------------------------------------------------------------

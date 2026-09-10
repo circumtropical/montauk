@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block title %}Pair WhatsApp &middot; Montauk{% endblock %}
+{% block body %}
+  <p class="muted"><a href="/connectors">&larr; Connectors</a></p>
+  <h1>Pair WhatsApp</h1>
+
+  <div class="card" data-pair-poll data-url="/connectors/whatsapp/pair.json">
+    <ol class="muted">
+      <li>On your phone, open <strong>WhatsApp &rarr; Settings &rarr; Linked devices</strong>.</li>
+      <li>Tap <strong>Link a device</strong> and scan this code.</li>
+    </ol>
+    <p data-pair-msg>Waiting for a pairing code&hellip;</p>
+    <p><img data-pair-qr alt="WhatsApp pairing QR code" width="264" height="264"
+            style="image-rendering:pixelated;background:#fff;border:1px solid var(--line, #ccc)"></p>
+    <noscript><p class="notice">This page needs JavaScript to show the rotating QR code.
+      Reload <a href="/connectors/whatsapp/pair">this page</a> after a few seconds if the code expires.</p></noscript>
+  </div>
+{% endblock %}

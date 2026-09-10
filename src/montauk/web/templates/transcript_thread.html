@@ -42,20 +42,24 @@
         <thead><tr><th>Sender</th><th>Messages</th><th>Role</th><th>Person</th></tr></thead>
         <tbody>
         {% for p in view.participants %}
+          {% set suggested = p.role == 'unmapped' and p.suggested_public_id %}
+          {% set eff_role = 'person' if suggested else p.role %}
+          {% set eff_person = p.suggested_public_id if suggested else p.person_public_id %}
           <tr>
-            <td>{{ p.display_name }}</td>
+            <td>{{ p.display_name }}
+              {%- if suggested %}<div class="muted">suggested from WhatsApp &mdash; confirm below</div>{% endif %}</td>
             <td>{{ p.message_count }}</td>
             <td><select name="role_{{ p.id }}" data-participant-role {{ 'disabled' if extraction_active }}>
-              <option value="unmapped" {{ 'selected' if p.role == 'unmapped' }}>&mdash;</option>
-              <option value="owner" {{ 'selected' if p.role == 'owner' }}>the owner</option>
-              <option value="person" {{ 'selected' if p.role == 'person' }}>a person</option>
-              <option value="ignored" {{ 'selected' if p.role == 'ignored' }}>ignore</option>
+              <option value="unmapped" {{ 'selected' if eff_role == 'unmapped' }}>&mdash;</option>
+              <option value="owner" {{ 'selected' if eff_role == 'owner' }}>the owner</option>
+              <option value="person" {{ 'selected' if eff_role == 'person' }}>a person</option>
+              <option value="ignored" {{ 'selected' if eff_role == 'ignored' }}>ignore</option>
             </select></td>
-            <td><span data-person-cell {{ 'hidden' if p.role != 'person' }}>
+            <td><span data-person-cell {{ 'hidden' if eff_role != 'person' }}>
               <select name="person_{{ p.id }}" data-participant-person {{ 'disabled' if extraction_active }}>
               <option value="">(pick a person)</option>
               {% for person in people %}
-              <option value="{{ person.public_id }}" {{ 'selected' if p.person_public_id == person.public_id }}>{{ person.name }} ({{ person.public_id }})</option>
+              <option value="{{ person.public_id }}" {{ 'selected' if eff_person == person.public_id }}>{{ person.name }} ({{ person.public_id }})</option>
               {% endfor %}
             </select></span></td>
           </tr>
@@ -78,7 +82,7 @@
         <p class="muted">{{ view.processed }} / {{ to_process }} messages processed.
           The rest are extracted in local-calendar-day batches; facts are added with
           <em>automatically extracted</em> authority (an owner or agent edit always wins).</p>
-        {% if view.awaiting_processing and view.mapped_people %}
+        {% if view.awaiting_processing and view.effective_mapped %}
           <button type="submit">Save &amp; run extraction ({{ view.awaiting_processing }} pending)</button>
         {% elif view.awaiting_processing %}
           <button type="submit" class="secondary">Save mapping</button>

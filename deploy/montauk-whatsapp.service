@@ -1,0 +1,35 @@
+# ~/.config/systemd/user/montauk-whatsapp.service
+#
+# Receive-only WhatsApp linked-device sidecar for the Montauk inbound
+# connector (docs/adr/0004). Runs alongside montauk-dashboard / montauk-mcp.
+#
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now montauk-whatsapp
+#
+# The dashboard process must have MONTAUK_WA_SIDECAR_URL + _TOKEN set to the
+# same values (put them in ~/montauk-data/dashboard.env).
+
+[Unit]
+Description=Montauk WhatsApp sidecar (receive-only)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/montauk/sidecars/whatsapp
+# Adjust the node path to `which node` on your box.
+Environment=PATH=%h/.nvm/versions/node/v24.18.1/bin:/usr/local/bin:/usr/bin:/bin
+Environment=MONTAUK_WA_SIDECAR_HOST=127.0.0.1
+Environment=MONTAUK_WA_SIDECAR_PORT=8766
+EnvironmentFile=%h/montauk-data/whatsapp-sidecar.env
+ExecStart=%h/.nvm/versions/node/v24.18.1/bin/node server.js
+Restart=on-failure
+RestartSec=5
+# The sidecar holds no secrets on disk; it only needs its own code + node_modules.
+ProtectHome=read-only
+ReadWritePaths=-%h/montauk/sidecars/whatsapp
+NoNewPrivileges=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=default.target

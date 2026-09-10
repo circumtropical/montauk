@@ -75,6 +75,36 @@ already be signed in (`claude` interactively once) — that's the explicit
 owner action, no API key involved. Alternatively put the full path in the
 dashboard's "CLI binary" field.
 
+## WhatsApp connector (optional)
+
+The WhatsApp inbound connector needs a third process — a receive-only Baileys
+sidecar (`sidecars/whatsapp/`). It is **not** exposed through the reverse proxy;
+the dashboard talks to it on loopback.
+
+```
+cd ~/montauk/sidecars/whatsapp && npm install
+printf 'MONTAUK_WA_SIDECAR_TOKEN=%s\n' "$(openssl rand -hex 32)" > ~/montauk-data/whatsapp-sidecar.env
+chmod 600 ~/montauk-data/whatsapp-sidecar.env
+
+cp ~/montauk/deploy/montauk-whatsapp.service ~/.config/systemd/user/
+#  ... edit the node path to `which node` ...
+systemctl --user daemon-reload && systemctl --user enable --now montauk-whatsapp
+```
+
+Then add to `~/montauk-data/dashboard.env` (the dashboard drives the sidecar and
+stores the encrypted linked-device session):
+
+```
+MONTAUK_WA_SIDECAR_URL=http://127.0.0.1:8766
+MONTAUK_WA_SIDECAR_TOKEN=<same token as whatsapp-sidecar.env>
+```
+
+`MONTAUK_MASTER_KEY` must be set (the session is stored encrypted). Restart the
+dashboard, then pair from **Connectors → Connect WhatsApp**. The MCP process
+should keep `MONTAUK_RUN_CONNECTORS=0` (or leave the sidecar vars unset in its
+env) so only the dashboard runs the sync loop. See
+`docs/adr/0004-whatsapp-inbound-connector.md`.
+
 ## Alternative: a separate port
 
 If you would rather keep paths clean, give the dashboard its own listener:

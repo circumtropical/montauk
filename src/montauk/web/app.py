@@ -7,9 +7,12 @@ a separate increment.
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import datetime as dt
+import logging
 import uuid
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -114,6 +117,25 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         return response
 
 
+@contextlib.asynccontextmanager
+async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
+    """Run the inbound-connector driver for the life of the process, but
+    only in a dashboard process with a configured sidecar."""
+    from ..connectors import runner
+
+    task: asyncio.Task[None] | None = None
+    if runner.runner_enabled():
+        logging.getLogger("montauk").info("starting inbound-connector runner")
+        task = asyncio.create_task(runner.run(app.state.montauk))
+    try:
+        yield
+    finally:
+        if task is not None:
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+
+
 def create_app(
     factory: sessionmaker[Session] | None = None,
     *,
@@ -124,12 +146,12 @@ def create_app(
     if factory is None:
         factory = session_factory(create_db_engine(database_url))
 
-    app = FastAPI(title="Montauk", docs_url=None, redoc_url=None, openapi_url=None)
+    app = FastAPI(title="Montauk", docs_url=None, redoc_url=None, openapi_url=None, lifespan=_lifespan)
     app.state.montauk = AppState(factory, throttle=throttle or LoginThrottle(), secure_cookies=secure_cookies)
     app.add_middleware(SecurityHeadersMiddleware)
     app.mount("/static", StaticFiles(directory=str(_HERE / "static")), name="static")
 
-    from .routes import auth, exports, home, people, settings, setup, transcripts
+    from .routes import auth, connectors, exports, home, people, settings, setup, transcripts
 
     app.include_router(setup.router)
     app.include_router(auth.router)
@@ -138,6 +160,7 @@ def create_app(
     app.include_router(exports.router)
     app.include_router(settings.router)
     app.include_router(transcripts.router)
+    app.include_router(connectors.router)
 
     @app.middleware("http")
     async def _guard(request: Request, call_next):  # type: ignore[no-untyped-def]

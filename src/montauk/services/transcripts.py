@@ -249,6 +249,10 @@ class ParticipantView:
     person_public_id: str | None
     person_name: str | None
     message_count: int
+    # A connector's unconfirmed guess (spec 14): shown pre-selected on the
+    # page, but only persisted -- i.e. confirmed -- when the owner saves.
+    suggested_public_id: str | None = None
+    suggested_name: str | None = None
 
 
 @dataclass
@@ -268,6 +272,17 @@ class ThreadView:
     @property
     def mapped_people(self) -> int:
         return sum(1 for p in self.participants if p.role == "person" and p.person_public_id)
+
+    @property
+    def effective_mapped(self) -> int:
+        """Confirmed mappings plus still-unconfirmed connector suggestions --
+        used to decide whether the run button is offered; saving the form
+        turns the suggestions into confirmed mappings."""
+        return sum(
+            1
+            for p in self.participants
+            if (p.role == "person" and p.person_public_id) or (p.role == "unmapped" and p.suggested_public_id)
+        )
 
     @property
     def has_owner(self) -> bool:
@@ -338,7 +353,7 @@ def get_thread(
         .scalars()
         .all()
     )
-    person_ids = {p.person_id for p in parts if p.person_id}
+    person_ids = {pid for p in parts for pid in (p.person_id, p.suggested_person_id) if pid}
     people = (
         {p.id: p for p in session.execute(select(orm.Person).where(orm.Person.id.in_(person_ids))).scalars()}
         if person_ids
@@ -351,6 +366,10 @@ def get_thread(
             role=p.role,
             person_public_id=people[p.person_id].public_id if p.person_id in people else None,
             person_name=people[p.person_id].name if p.person_id in people else None,
+            suggested_public_id=(
+                people[p.suggested_person_id].public_id if p.suggested_person_id in people else None
+            ),
+            suggested_name=(people[p.suggested_person_id].name if p.suggested_person_id in people else None),
             message_count=int(counts.get(p.display_name_normalized, 0)),
         )
         for p in parts

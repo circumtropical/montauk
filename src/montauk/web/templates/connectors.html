@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Connectors &middot; Montauk{% endblock %}
+{% block body %}
+  <h1>Inbound connectors</h1>
+  <p class="muted">Connectors <strong>only read</strong>. Montauk archives both sides of the
+    conversations you enable and never sends, replies, or marks anything read.</p>
+
+  {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
+  {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
+
+  <div class="card">
+    <h2>WhatsApp <span class="muted">&mdash; unofficial linked device</span></h2>
+    <p class="muted">This uses an unofficial WhatsApp linked-device implementation (Baileys). It
+      can break when WhatsApp changes its protocol; the manual
+      <a href="/transcripts">chat-export importer</a> is always available as a fallback.</p>
+
+    {% if not sidecar_configured %}
+      <div class="notice"><strong>The WhatsApp sidecar is not running on this deployment.</strong>
+        Start the <code>montauk-whatsapp</code> service and set
+        <code>MONTAUK_WA_SIDECAR_TOKEN</code> / <code>MONTAUK_WA_SIDECAR_URL</code>, then reload.</div>
+    {% elif not master_key_present %}
+      <div class="notice"><strong>Set <code>MONTAUK_MASTER_KEY</code> first.</strong> The linked-device
+        session is stored encrypted; without a master key it cannot be saved.</div>
+    {% endif %}
+
+    {% set a = account %}
+    {% if not a or a.status in ('unconfigured', 'disconnected') %}
+      <p>Status: <strong>{{ a.status if a else 'not connected' }}</strong>
+        {% if a and a.last_error %}<span class="muted">&mdash; {{ a.last_error }}</span>{% endif %}</p>
+      <form method="post" action="/connectors/whatsapp/connect">
+        <input type="hidden" name="_csrf" value="{{ csrf }}">
+        <button type="submit" {{ 'disabled' if not sidecar_configured or not master_key_present }}>
+          Connect WhatsApp</button>
+      </form>
+    {% else %}
+      <p>Status: <strong>{{ a.status }}</strong>
+        {% if a.self_phone %}&middot; connected as {{ a.self_phone }}{% endif %}
+        {% if a.self_display_name %}({{ a.self_display_name }}){% endif %}</p>
+      <p class="muted">
+        {{ a.enabled_threads }} of {{ a.threads|length }} conversation(s) enabled &middot;
+        last sync {{ a.last_sync_at|humantime }}
+        {%- if a.last_error %} &middot; <span class="notice-inline">{{ a.last_error }}</span>{% endif %}
+      </p>
+      <form method="post" action="/connectors/whatsapp/sync" class="inline">
+        <input type="hidden" name="_csrf" value="{{ csrf }}">
+        <button type="submit">Sync now</button>
+      </form>
+      <form method="post" action="/connectors/whatsapp/discover" class="inline">
+        <input type="hidden" name="_csrf" value="{{ csrf }}">
+        <button type="submit" class="secondary">Refresh conversation list</button>
+      </form>
+      {% if a.status == 'pairing' %}
+        <p><a href="/connectors/whatsapp/pair">Finish pairing &rarr;</a></p>
+      {% endif %}
+    {% endif %}
+  </div>
+
+  {% if account and account.threads %}
+  <div class="card">
+    <h2>Conversations</h2>
+    <p class="muted">Nothing is archived until you enable a conversation (spec: selection before
+      content storage). Enabling pulls <strong>all available history</strong> plus new messages;
+      the messages then appear in <a href="/transcripts">Transcripts</a> to map and extract.</p>
+    <div class="scroll-x">
+    <table>
+      <thead><tr><th>Conversation</th><th>Type</th><th>Last message</th><th>Archived</th><th>History</th><th></th></tr></thead>
+      <tbody>
+      {% for t in account.threads %}
+        <tr>
+          <td>
+            {% if t.source_thread_id %}<a href="/transcripts/{{ t.source_thread_id }}">{{ t.title }}</a>
+            {% else %}{{ t.title }}{% endif %}
+            <div class="muted">{{ t.participant_names[:4]|join(', ') }}{{ '…' if t.participant_names|length > 4 }}</div>
+          </td>
+          <td>{{ 'group' if t.is_group else 'direct' }}</td>
+          <td>{{ t.last_message_at.strftime('%Y-%m-%d') if t.last_message_at else '—' }}</td>
+          <td>{{ t.archived_messages }}</td>
+          <td>{{ 'complete' if t.history_complete else ('syncing…' if t.enabled else '—') }}</td>
+          <td>
+            <form method="post" action="/connectors/whatsapp/threads/{{ t.id }}" class="inline">
+              <input type="hidden" name="_csrf" value="{{ csrf }}">
+              <input type="hidden" name="enabled" value="{{ '0' if t.enabled else '1' }}">
+              <button type="submit" class="{{ 'secondary' if t.enabled else '' }}">
+                {{ 'Disable' if t.enabled else 'Enable' }}</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Disconnect</h2>
+    <p class="muted">Disconnecting stops syncing but keeps every archived transcript and extracted
+      fact. Unlinking also removes this device from your phone's WhatsApp and clears the stored
+      session (you'd re-scan the QR to reconnect).</p>
+    <form method="post" action="/connectors/whatsapp/disconnect" class="inline">
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+      <button type="submit" class="secondary">Disconnect</button>
+    </form>
+    <form method="post" action="/connectors/whatsapp/disconnect" class="inline"
+          data-confirm="Unlink this device from WhatsApp and clear the stored session?">
+      <input type="hidden" name="_csrf" value="{{ csrf }}">
+      <input type="hidden" name="logout" value="1">
+      <button type="submit" class="danger">Unlink device</button>
+    </form>
+  </div>
+  {% endif %}
+{% endblock %}

@@ -56,9 +56,22 @@ and `memory_write` capabilities gate reads and writes per tool.
 
 The MCP surface: `search_people`, `prepare_person_briefing`, `get_context_sources`,
 `prepare_person_context`, `get_person` / `get_facts` / `get_interactions` / `get_full_record`,
-`list_people`, `get_upcoming_birthdays`, `list_overdue_contacts`, and the write tools
-(`create_person`, add/update/remove fact, record/update/remove/reattribute interaction,
-contact/summary/name/birthday/cadence, `update_person_batch`, archive/restore).
+`list_people`, `get_upcoming_birthdays`, `list_overdue_contacts`, `get_connector_health`, and the
+write tools (`create_person`, add/update/remove fact, record/update/remove/reattribute
+interaction, contact/summary/name/birthday/cadence, `update_person_batch`, archive/restore).
+
+## Sources
+
+Two ways to archive real conversations (both sides, text only — no attachments):
+
+- **Manual import** — WhatsApp chat exports (`.txt`), on the **Transcripts** page.
+- **WhatsApp connector** — a receive-only linked device (Baileys sidecar) that syncs enabled
+  conversations continuously. **Connectors → Connect WhatsApp**. It never sends, replies, or
+  marks anything read. Setup: `docs/adr/0004-whatsapp-inbound-connector.md` and
+  `sidecars/whatsapp/README.md`.
+
+Archived messages are immutable evidence; you map each sender to a person, then the extraction
+model turns new messages into facts and per-day interaction summaries.
 
 ## Model provider
 

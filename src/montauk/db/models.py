@@ -563,6 +563,17 @@ class LegacyMigrationRun(Base):
 
 PARTICIPANT_ROLES = ("unmapped", "owner", "person", "ignored")
 MESSAGE_STATUS_VALUES = ("awaiting_processing", "processed", "skipped")
+MESSAGE_DIRECTIONS = ("inbound", "outbound")
+
+CONNECTOR_PROVIDERS = ("whatsapp",)
+CONNECTOR_STATUS_VALUES = ("unconfigured", "pairing", "connected", "degraded", "disconnected")
+THREAD_HISTORY_WINDOWS = ("all", "since_date", "future_only")
+
+
+def _sql_in(values: tuple[str, ...]) -> str:
+    """``('a', 'b')`` for a CHECK ... IN clause -- safe for a one-element
+    tuple, unlike ``str(("a",))`` which leaves a trailing comma."""
+    return "(" + ", ".join(f"'{v}'" for v in values) + ")"
 
 
 class SourceThread(Base, TimestampMixin):
@@ -577,9 +588,13 @@ class SourceThread(Base, TimestampMixin):
     workspace_id: Mapped[uuid.UUID] = mapped_column(
         ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
     )
-    platform: Mapped[str] = mapped_column(String(32))  # "whatsapp_import"
+    platform: Mapped[str] = mapped_column(String(32))  # "whatsapp_import" | "whatsapp"
     thread_key: Mapped[str] = mapped_column(String(64))
     title: Mapped[str] = mapped_column(Text)
+    connector_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("connector_accounts.id", ondelete="SET NULL")
+    )
+    provider_thread_id: Mapped[str | None] = mapped_column(Text)  # WhatsApp JID for connector threads
 
     participants: Mapped[list[SourceParticipant]] = relationship(
         back_populates="thread", cascade="all, delete-orphan"
@@ -610,6 +625,13 @@ class SourceParticipant(Base):
     display_name_normalized: Mapped[str] = mapped_column(Text)
     role: Mapped[str] = mapped_column(String(16), default="unmapped")
     person_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("people.id", ondelete="SET NULL"))
+    # A connector records who it thinks a sender is here, never in `role` /
+    # `person_id`: the owner must confirm connector-originated mappings before
+    # extraction can attach facts (spec 14).
+    suggested_person_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("people.id", ondelete="SET NULL")
+    )
+    source_identity: Mapped[str | None] = mapped_column(Text)  # provider sender id (e.g. WhatsApp JID)
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
     thread: Mapped[SourceThread] = relationship(back_populates="participants")
@@ -623,7 +645,16 @@ class SourceMessage(Base):
     __tablename__ = "source_messages"
     __table_args__ = (
         UniqueConstraint("workspace_id", "thread_id", "fingerprint"),
+        # Dedup key 1 (spec 15.2): a stable provider message id within a thread.
+        # NULL for exports that carry none -- Postgres treats NULLs as distinct,
+        # so the importer is unaffected.
+        UniqueConstraint(
+            "workspace_id", "thread_id", "provider_message_id", name="uq_source_messages_provider_id"
+        ),
         CheckConstraint("processing_status IN " + str(MESSAGE_STATUS_VALUES), name="processing_status_valid"),
+        CheckConstraint(
+            "direction IS NULL OR direction IN " + _sql_in(MESSAGE_DIRECTIONS), name="direction_valid"
+        ),
         Index("ix_source_messages_thread_time", "workspace_id", "thread_id", "sent_at"),
     )
 
@@ -635,13 +666,20 @@ class SourceMessage(Base):
         ForeignKey("source_threads.id", ondelete="CASCADE"), index=True
     )
     import_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("source_imports.id", ondelete="SET NULL"))
+    connector_account_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("connector_accounts.id", ondelete="SET NULL")
+    )
     fingerprint: Mapped[str] = mapped_column(String(64))
+    provider_message_id: Mapped[str | None] = mapped_column(Text)
+    direction: Mapped[str | None] = mapped_column(String(8))  # inbound | outbound (connector only)
     sender_name: Mapped[str | None] = mapped_column(Text)
     sender_normalized: Mapped[str | None] = mapped_column(Text)
+    sender_identity: Mapped[str | None] = mapped_column(Text)  # provider sender id (WhatsApp JID)
     sent_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True))
     text: Mapped[str] = mapped_column(Text)
     is_system: Mapped[bool] = mapped_column(default=False)
     media_omitted: Mapped[bool] = mapped_column(default=False)
+    content_omitted: Mapped[bool] = mapped_column(default=False)  # attachment placeholder (spec 9.1)
     processing_status: Mapped[str] = mapped_column(String(24), default="awaiting_processing")
     ingested_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
@@ -667,3 +705,85 @@ class SourceImport(Base):
     warnings: Mapped[Any | None] = mapped_column(JSONB)
     created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+
+
+# --- inbound source connectors (spec 10, 11) ---------------------------
+#
+# Connectors are INBOUND ONLY. No model, repository, route, or job in this
+# codebase exposes an operation that sends, replies, reacts, marks read,
+# deletes, or edits a remote message. See docs/adr/0004 and
+# montauk.connectors.base.assert_inbound_only.
+
+
+class ConnectorAccount(Base, TimestampMixin):
+    """One linked inbound source account. Holds the encrypted linked-device
+    session and the connection state machine
+    (unconfigured -> pairing -> connected -> degraded -> disconnected)."""
+
+    __tablename__ = "connector_accounts"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "provider", name="uq_connector_accounts_workspace_provider"),
+        CheckConstraint("provider IN " + _sql_in(CONNECTOR_PROVIDERS), name="provider_valid"),
+        CheckConstraint("status IN " + _sql_in(CONNECTOR_STATUS_VALUES), name="status_valid"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    provider: Mapped[str] = mapped_column(String(24))
+    status: Mapped[str] = mapped_column(String(16), default="unconfigured")
+    self_identity: Mapped[str | None] = mapped_column(Text)  # own JID
+    self_display_name: Mapped[str | None] = mapped_column(Text)
+    self_phone: Mapped[str | None] = mapped_column(String(32))
+    encrypted_session: Mapped[str | None] = mapped_column(Text)  # SecretBox envelope of the creds blob
+    session_updated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_connected_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_sync_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(Text)
+    inbox_seq: Mapped[int] = mapped_column(Integer, default=0)  # highest live seq already archived
+    created_by: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"))
+
+    threads: Mapped[list[ConnectorThread]] = relationship(
+        back_populates="account", cascade="all, delete-orphan"
+    )
+
+
+class ConnectorThread(Base):
+    """A conversation discovered on a connected account. Only thread metadata
+    is stored here; message content is NOT archived until `enabled` (spec
+    10.2). When enabled, messages land in `source_threads` / `source_messages`
+    and `source_thread_id` links the two."""
+
+    __tablename__ = "connector_threads"
+    __table_args__ = (
+        UniqueConstraint("account_id", "provider_thread_id", name="uq_connector_threads_account_thread"),
+        CheckConstraint("history_window IN " + _sql_in(THREAD_HISTORY_WINDOWS), name="history_window_valid"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    account_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("connector_accounts.id", ondelete="CASCADE"), index=True
+    )
+    provider_thread_id: Mapped[str] = mapped_column(Text)  # WhatsApp JID
+    title: Mapped[str] = mapped_column(Text)
+    is_group: Mapped[bool] = mapped_column(default=False)
+    participants: Mapped[Any | None] = mapped_column(JSONB)  # [{jid, name, is_self}]
+    last_message_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    message_estimate: Mapped[int | None] = mapped_column(Integer)
+    enabled: Mapped[bool] = mapped_column(default=False)
+    enabled_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    history_window: Mapped[str] = mapped_column(String(16), default="all")
+    history_since: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    history_complete: Mapped[bool] = mapped_column(default=False)
+    history_cursor: Mapped[Any | None] = mapped_column(JSONB)
+    source_thread_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("source_threads.id", ondelete="SET NULL")
+    )
+    discovered_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
+    updated_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
+
+    account: Mapped[ConnectorAccount] = relationship(back_populates="threads")
