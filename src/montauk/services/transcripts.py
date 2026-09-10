@@ -49,15 +49,36 @@ def _fingerprint(thread_key: str, sender_norm: str, sent_at: dt.datetime, text: 
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _guess_participant(repo: PeopleRepository, display_name: str, norm: str) -> tuple[str, uuid.UUID | None]:
+def _first_name_matches(people: list[orm.Person], norm: str) -> list[orm.Person]:
+    """WhatsApp often shows only a first name ("Jasmin"); match its leading
+    token against the leading token of each person's name or alias."""
+    token = norm.split(" ", 1)[0]
+    if not token:
+        return []
+    hits: list[orm.Person] = []
+    for person in people:
+        names = [person.name, *(a.alias for a in person.aliases)]
+        if any(normalize_alias(n).split(" ", 1)[0] == token for n in names if n):
+            hits.append(person)
+    return hits
+
+
+def _guess_participant(
+    people: list[orm.Person], repo: PeopleRepository, display_name: str, norm: str
+) -> tuple[str, uuid.UUID | None]:
     """First-pass guess for a newly-seen sender. WhatsApp labels the
     exporting user's own messages "You"; other names are matched to an
-    existing person by name/alias when the match is unambiguous."""
+    existing person -- first on the full name/alias, then on the first name
+    alone -- when exactly one person fits."""
     if norm in _OWNER_NAMES:
         return "owner", None
-    matches = repo.find_by_name(display_name)
-    if len(matches) == 1:
-        return "person", matches[0].id
+    exact = repo.find_by_name(display_name)
+    if len(exact) == 1:
+        return "person", exact[0].id
+    if not exact:
+        loose = _first_name_matches(people, norm)
+        if len(loose) == 1:
+            return "person", loose[0].id
     return "unmapped", None
 
 
@@ -109,6 +130,7 @@ def import_whatsapp(
         thread.updated_at = dt.datetime.now(dt.UTC)
 
     repo = PeopleRepository(scope)
+    people = list(repo.list_people(archived=False))
     existing = {
         p.display_name_normalized: p
         for p in session.execute(
@@ -116,9 +138,16 @@ def import_whatsapp(
         ).scalars()
     }
     for name, norm in zip(parsed.participants, norms, strict=True):
-        if norm in existing:
+        part = existing.get(norm)
+        if part is not None:
+            # Re-guess only participants the owner has never touched, so a
+            # re-import picks up people added since the last import.
+            if part.role == "unmapped" and part.person_id is None:
+                role, person_id = _guess_participant(people, repo, name, norm)
+                if role != "unmapped":
+                    part.role, part.person_id = role, person_id
             continue
-        role, person_id = _guess_participant(repo, name, norm)
+        role, person_id = _guess_participant(people, repo, name, norm)
         part = orm.SourceParticipant(
             workspace_id=ws,
             thread_id=thread.id,

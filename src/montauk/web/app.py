@@ -40,6 +40,17 @@ def _humantime(value: dt.datetime | None) -> str:
 TEMPLATES.env.filters["humantime"] = _humantime
 
 
+def _asset_version() -> str:
+    """Newest mtime under static/, so a deploy busts the browser cache for
+    montauk.css / montauk.js without a manual version bump."""
+    static = _HERE / "static"
+    latest = max((p.stat().st_mtime for p in static.glob("*") if p.is_file()), default=0.0)
+    return str(int(latest))
+
+
+TEMPLATES.env.globals["asset_version"] = _asset_version()
+
+
 class AppState:
     def __init__(self, factory: sessionmaker[Session], *, throttle: LoginThrottle, secure_cookies: bool):
         self.session_factory = factory

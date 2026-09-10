@@ -74,11 +74,10 @@
   // that row's role is "a person". Without JS both selects are visible.
   document.querySelectorAll("select[data-participant-role]").forEach(function (roleSel) {
     var row = roleSel.closest("tr") || roleSel.form;
-    var personSel = row && row.querySelector("select[data-participant-person]");
-    if (!personSel) return;
-    var cell = personSel.closest("td") || personSel.parentNode;
+    var cell = row && row.querySelector("[data-person-cell]");
+    if (!cell) return;
     function sync() {
-      cell.style.visibility = roleSel.value === "person" ? "" : "hidden";
+      cell.hidden = roleSel.value !== "person";
     }
     roleSel.addEventListener("change", sync);
     sync();

@@ -51,12 +51,13 @@
               <option value="person" {{ 'selected' if p.role == 'person' }}>a person</option>
               <option value="ignored" {{ 'selected' if p.role == 'ignored' }}>ignore</option>
             </select></td>
-            <td><select name="person_{{ p.id }}" data-participant-person {{ 'disabled' if extraction_active }}>
+            <td><span data-person-cell {{ 'hidden' if p.role != 'person' }}>
+              <select name="person_{{ p.id }}" data-participant-person {{ 'disabled' if extraction_active }}>
               <option value="">(pick a person)</option>
               {% for person in people %}
               <option value="{{ person.public_id }}" {{ 'selected' if p.person_public_id == person.public_id }}>{{ person.name }} ({{ person.public_id }})</option>
               {% endfor %}
-            </select></td>
+            </select></span></td>
           </tr>
         {% endfor %}
         </tbody>

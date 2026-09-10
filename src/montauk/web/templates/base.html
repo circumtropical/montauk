@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="robots" content="noindex, nofollow">
   <title>{% block title %}Montauk{% endblock %}</title>
-  <link rel="stylesheet" href="/static/montauk.css">
-  <script src="/static/montauk.js" defer></script>
+  <link rel="stylesheet" href="/static/montauk.css?v={{ asset_version }}">
+  <script src="/static/montauk.js?v={{ asset_version }}" defer></script>
 </head>
 <body>
 {% if auth %}

@@ -117,6 +117,35 @@ class TestImport:
         assert roles["Robin Vega"] == ("person", robin.id)  # name match
         assert roles["Mystery Person"][0] == "unmapped"  # no match
 
+    def test_guesses_a_person_from_a_first_name_only_label(self, db_session, scope):
+        jasmin = PeopleRepository(scope).create(Person(id="P0009", name="Jasmin Fontaine"))
+        db_session.flush()
+        export = b"[2026-03-01, 9:00:00 AM] You: hi\n[2026-03-01, 9:01:00 AM] Jasmin: hey\n"
+        self._import(db_session, scope, export)
+        roles = {p.display_name: (p.role, p.person_id) for p in db_session.query(orm.SourceParticipant).all()}
+        assert roles["Jasmin"] == ("person", jasmin.id)
+        assert roles["You"][0] == "owner"
+
+    def test_first_name_match_stays_unmapped_when_ambiguous(self, db_session, scope):
+        repo = PeopleRepository(scope)
+        repo.create(Person(id="P0009", name="Jasmin Fontaine"))
+        repo.create(Person(id="P0010", name="Jasmin Wu"))
+        db_session.flush()
+        export = b"[2026-03-01, 9:00:00 AM] You: hi\n[2026-03-01, 9:01:00 AM] Jasmin: hey\n"
+        self._import(db_session, scope, export)
+        roles = {p.display_name: p.role for p in db_session.query(orm.SourceParticipant).all()}
+        assert roles["Jasmin"] == "unmapped"
+
+    def test_reimport_reguesses_untouched_participants(self, db_session, scope):
+        export = b"[2026-03-01, 9:00:00 AM] You: hi\n[2026-03-01, 9:01:00 AM] Jasmin: hey\n"
+        self._import(db_session, scope, export)
+        assert {p.role for p in db_session.query(orm.SourceParticipant).all()} == {"owner", "unmapped"}
+        jasmin = PeopleRepository(scope).create(Person(id="P0009", name="Jasmin Fontaine"))
+        db_session.flush()
+        self._import(db_session, scope, export)
+        roles = {p.display_name: (p.role, p.person_id) for p in db_session.query(orm.SourceParticipant).all()}
+        assert roles["Jasmin"] == ("person", jasmin.id)
+
     def test_guesses_owner_as_the_other_side_of_a_pair(self, db_session, scope):
         PeopleRepository(scope).create(Person(id="P0001", name="Amanda Dwelley"))
         db_session.flush()
