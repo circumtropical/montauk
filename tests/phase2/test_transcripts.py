@@ -78,7 +78,10 @@ class TestImport:
         assert set(r.participants) == {"Alex", "Robin Vega"}
 
         parts = db_session.query(orm.SourceParticipant).all()
-        assert {p.role for p in parts} == {"unmapped"}
+        # No one in the DB to match, so both senders default to an
+        # unidentified "person" (a chat sender is a person, not "--").
+        assert {p.role for p in parts} == {"person"}
+        assert all(p.person_id is None for p in parts)
         msgs = db_session.query(orm.SourceMessage).all()
         awaiting = [m for m in msgs if m.processing_status == "awaiting_processing"]
         skipped = [m for m in msgs if m.processing_status == "skipped"]
@@ -115,7 +118,7 @@ class TestImport:
         roles = {p.display_name: (p.role, p.person_id) for p in db_session.query(orm.SourceParticipant).all()}
         assert roles["You"][0] == "owner"
         assert roles["Robin Vega"] == ("person", robin.id)  # name match
-        assert roles["Mystery Person"][0] == "unmapped"  # no match
+        assert roles["Mystery Person"] == ("person", None)  # unidentified, still a person
 
     def test_guesses_a_person_from_a_first_name_only_label(self, db_session, scope):
         jasmin = PeopleRepository(scope).create(Person(id="P0009", name="Jasmin Fontaine"))
@@ -126,20 +129,28 @@ class TestImport:
         assert roles["Jasmin"] == ("person", jasmin.id)
         assert roles["You"][0] == "owner"
 
-    def test_first_name_match_stays_unmapped_when_ambiguous(self, db_session, scope):
+    def test_first_name_match_ignores_trailing_punctuation(self, db_session, scope):
+        jasmin = PeopleRepository(scope).create(Person(id="P0009", name="Jasmin Fontaine"))
+        db_session.flush()
+        export = b"[2026-03-01, 9:00:00 AM] You: hi\n[2026-03-01, 9:01:00 AM] Jasmin?: hey\n"
+        self._import(db_session, scope, export)
+        roles = {p.display_name: (p.role, p.person_id) for p in db_session.query(orm.SourceParticipant).all()}
+        assert roles["Jasmin?"] == ("person", jasmin.id)
+
+    def test_first_name_match_left_unidentified_when_ambiguous(self, db_session, scope):
         repo = PeopleRepository(scope)
         repo.create(Person(id="P0009", name="Jasmin Fontaine"))
         repo.create(Person(id="P0010", name="Jasmin Wu"))
         db_session.flush()
         export = b"[2026-03-01, 9:00:00 AM] You: hi\n[2026-03-01, 9:01:00 AM] Jasmin: hey\n"
         self._import(db_session, scope, export)
-        roles = {p.display_name: p.role for p in db_session.query(orm.SourceParticipant).all()}
-        assert roles["Jasmin"] == "unmapped"
+        roles = {p.display_name: (p.role, p.person_id) for p in db_session.query(orm.SourceParticipant).all()}
+        assert roles["Jasmin"] == ("person", None)  # a person, but we can't say which
 
-    def test_reimport_reguesses_untouched_participants(self, db_session, scope):
+    def test_reimport_fills_in_a_person_added_later(self, db_session, scope):
         export = b"[2026-03-01, 9:00:00 AM] You: hi\n[2026-03-01, 9:01:00 AM] Jasmin: hey\n"
         self._import(db_session, scope, export)
-        assert {p.role for p in db_session.query(orm.SourceParticipant).all()} == {"owner", "unmapped"}
+        assert {p.role for p in db_session.query(orm.SourceParticipant).all()} == {"owner", "person"}
         jasmin = PeopleRepository(scope).create(Person(id="P0009", name="Jasmin Fontaine"))
         db_session.flush()
         self._import(db_session, scope, export)

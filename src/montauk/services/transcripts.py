@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime as dt
 import hashlib
+import re
 import uuid
 from dataclasses import dataclass, field
 
@@ -19,7 +20,18 @@ from ..ids import normalize_alias
 from .whatsapp import PARSER_VERSION, parse_whatsapp_export
 
 PLATFORM = "whatsapp_import"
-_OWNER_NAMES = {"you", "me"}
+_OWNER_NAMES = {"you", "me", "myself"}
+_EDGE_PUNCT = re.compile(r"^\W+|\W+$")
+
+
+def _name_key(value: str) -> str:
+    """Comparison key for a WhatsApp sender label: normalized, then with
+    leading/trailing punctuation stripped ("Jasmin?" -> "jasmin")."""
+    return _EDGE_PUNCT.sub("", normalize_alias(value))
+
+
+def _first_name_key(value: str) -> str:
+    return _name_key(value.split(" ", 1)[0]) if value else ""
 
 
 class TranscriptError(ValueError):
@@ -49,48 +61,45 @@ def _fingerprint(thread_key: str, sender_norm: str, sent_at: dt.datetime, text: 
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-def _first_name_matches(people: list[orm.Person], norm: str) -> list[orm.Person]:
-    """WhatsApp often shows only a first name ("Jasmin"); match its leading
-    token against the leading token of each person's name or alias."""
-    token = norm.split(" ", 1)[0]
-    if not token:
-        return []
-    hits: list[orm.Person] = []
+def _name_matches(people: list[orm.Person], display_name: str) -> list[orm.Person]:
+    """People whose name or an alias matches the sender label -- on the full
+    string first, then on the first name alone ("Jasmin" -> "Jasmin
+    Fontaine"). Punctuation on either side is ignored."""
+    full = _name_key(display_name)
+    first = _first_name_key(display_name)
+    exact: list[orm.Person] = []
+    loose: list[orm.Person] = []
     for person in people:
-        names = [person.name, *(a.alias for a in person.aliases)]
-        if any(normalize_alias(n).split(" ", 1)[0] == token for n in names if n):
-            hits.append(person)
-    return hits
+        keys = [_name_key(n) for n in (person.name, *(a.alias for a in person.aliases)) if n]
+        if full and full in keys:
+            exact.append(person)
+        elif first and any(k.split(" ", 1)[0] == first for k in keys):
+            loose.append(person)
+    return exact or loose
 
 
-def _guess_participant(
-    people: list[orm.Person], repo: PeopleRepository, display_name: str, norm: str
-) -> tuple[str, uuid.UUID | None]:
+def _guess_participant(people: list[orm.Person], display_name: str) -> tuple[str, uuid.UUID | None]:
     """First-pass guess for a newly-seen sender. WhatsApp labels the
-    exporting user's own messages "You"; other names are matched to an
-    existing person -- first on the full name/alias, then on the first name
-    alone -- when exactly one person fits."""
-    if norm in _OWNER_NAMES:
+    exporting user's own messages "You"; every other sender in a chat is a
+    person, identified against the roster when exactly one name fits."""
+    if _name_key(display_name) in _OWNER_NAMES:
         return "owner", None
-    exact = repo.find_by_name(display_name)
-    if len(exact) == 1:
-        return "person", exact[0].id
-    if not exact:
-        loose = _first_name_matches(people, norm)
-        if len(loose) == 1:
-            return "person", loose[0].id
-    return "unmapped", None
+    hits = _name_matches(people, display_name)
+    if len(hits) == 1:
+        return "person", hits[0].id
+    return "person", None  # a non-owner sender is still a person, just not yet identified
 
 
 def _guess_owner_from_pair(participants: list[orm.SourceParticipant]) -> None:
-    """In a two-person thread where one side is mapped to a person and the
-    other is still unmapped, the unmapped side is almost certainly the owner."""
-    if len(participants) != 2:
+    """In a two-person thread with no owner yet, where one side is
+    identified as a known person and the other is not, the unidentified
+    side is almost certainly the owner."""
+    if len(participants) != 2 or any(p.role == "owner" for p in participants):
         return
-    mapped = [p for p in participants if p.role == "person"]
-    unmapped = [p for p in participants if p.role == "unmapped"]
-    if len(mapped) == 1 and len(unmapped) == 1:
-        unmapped[0].role = "owner"
+    identified = [p for p in participants if p.person_id is not None]
+    unknown = [p for p in participants if p.person_id is None and p.role == "person"]
+    if len(identified) == 1 and len(unknown) == 1:
+        unknown[0].role = "owner"
 
 
 def import_whatsapp(
@@ -129,8 +138,7 @@ def import_whatsapp(
         thread.title = title
         thread.updated_at = dt.datetime.now(dt.UTC)
 
-    repo = PeopleRepository(scope)
-    people = list(repo.list_people(archived=False))
+    people = list(PeopleRepository(scope).list_people(archived=False))
     existing = {
         p.display_name_normalized: p
         for p in session.execute(
@@ -140,14 +148,17 @@ def import_whatsapp(
     for name, norm in zip(parsed.participants, norms, strict=True):
         part = existing.get(norm)
         if part is not None:
-            # Re-guess only participants the owner has never touched, so a
-            # re-import picks up people added since the last import.
-            if part.role == "unmapped" and part.person_id is None:
-                role, person_id = _guess_participant(people, repo, name, norm)
-                if role != "unmapped":
-                    part.role, part.person_id = role, person_id
+            # Fill in a still-unidentified participant on re-import, so a
+            # person added since the last import gets picked up. Never
+            # override a role or mapping the owner has set.
+            if part.person_id is None and part.role in ("unmapped", "person"):
+                role, person_id = _guess_participant(people, name)
+                if person_id is not None:
+                    part.role, part.person_id = "person", person_id
+                elif part.role == "unmapped":
+                    part.role = role
             continue
-        role, person_id = _guess_participant(people, repo, name, norm)
+        role, person_id = _guess_participant(people, name)
         part = orm.SourceParticipant(
             workspace_id=ws,
             thread_id=thread.id,
@@ -399,9 +410,7 @@ def map_participant(
         raise TranscriptError("no such participant")
 
     person_uuid: uuid.UUID | None = None
-    if role == "person":
-        if not person_public_id:
-            raise TranscriptError("choose a person to map this participant to")
+    if role == "person" and person_public_id:
         person = session.execute(
             select(orm.Person)
             .where(orm.Person.workspace_id == scope.workspace_id)
