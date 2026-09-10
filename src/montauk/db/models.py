@@ -778,6 +778,8 @@ class ConnectorThread(Base):
     enabled_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
     history_window: Mapped[str] = mapped_column(String(16), default="all")
     history_since: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+    history_message_cap: Mapped[int | None] = mapped_column(Integer)  # "last N messages" bound
+    history_synced_count: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     history_complete: Mapped[bool] = mapped_column(default=False)
     history_cursor: Mapped[Any | None] = mapped_column(JSONB)
     source_thread_id: Mapped[uuid.UUID | None] = mapped_column(

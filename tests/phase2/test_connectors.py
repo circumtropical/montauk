@@ -180,6 +180,90 @@ class TestArchiving:
         assert m.processing_status == "skipped"
 
 
+class TestHistoryBounds:
+    async def _ready(self, db_session, scope, connector, fake, secret_box):
+        fake.add_direct_thread(ROBIN, "Robin Vega")
+        await service.begin_pairing(db_session, scope, connector, created_by=None)
+        fake.complete_pairing()
+        account = service.get_account(db_session, scope.workspace_id)
+        await service.refresh_status(db_session, scope, account, connector, secret_box)
+        await service.discover(db_session, scope, account, connector)
+        ct = db_session.query(orm.ConnectorThread).filter_by(account_id=account.id).first()
+        # 10 daily messages, oldest 40 days back
+        now = dt.datetime.now(dt.UTC)
+        fake.history[ROBIN] = [msg(f"h{i}", ROBIN, at=now - dt.timedelta(days=40 - i * 4)) for i in range(10)]
+        return account, ct
+
+    async def test_last_n_days_only_pulls_recent(self, db_session, scope, connector, fake, secret_box):
+        account, ct = await self._ready(db_session, scope, connector, fake, secret_box)
+        w, since, cap = service.resolve_history_bound("days", days=30)
+        service.set_thread_enabled(
+            db_session,
+            scope,
+            account,
+            ct.id,
+            enabled=True,
+            history_window=w,
+            history_since=since,
+            history_message_cap=cap,
+        )
+        await service.sync_account(db_session, scope, account, connector, secret_box)
+        cutoff = dt.datetime.now(dt.UTC) - dt.timedelta(days=30)
+        rows = db_session.query(orm.SourceMessage).all()
+        assert rows and all(m.sent_at >= cutoff for m in rows)
+        assert len(rows) < 10
+
+    async def test_last_n_messages_cap(self, db_session, scope, connector, fake, secret_box):
+        account, ct = await self._ready(db_session, scope, connector, fake, secret_box)
+        w, since, cap = service.resolve_history_bound("count", count=4)
+        service.set_thread_enabled(
+            db_session,
+            scope,
+            account,
+            ct.id,
+            enabled=True,
+            history_window=w,
+            history_since=since,
+            history_message_cap=cap,
+        )
+        await service.sync_account(db_session, scope, account, connector, secret_box)
+        rows = db_session.query(orm.SourceMessage).order_by(orm.SourceMessage.sent_at).all()
+        assert len(rows) == 4
+        assert [m.provider_message_id for m in rows] == ["h6", "h7", "h8", "h9"]  # the most recent 4
+
+    async def test_reconfiguring_bounds_restarts_history(
+        self, db_session, scope, connector, fake, secret_box
+    ):
+        account, ct = await self._ready(db_session, scope, connector, fake, secret_box)
+        service.set_thread_enabled(
+            db_session,
+            scope,
+            account,
+            ct.id,
+            enabled=True,
+            history_window="all",
+            history_since=None,
+            history_message_cap=2,
+        )
+        await service.sync_account(db_session, scope, account, connector, secret_box)
+        assert db_session.query(orm.SourceMessage).count() == 2
+        # widen the bound -> history_complete resets and the rest come in
+        service.set_thread_enabled(
+            db_session,
+            scope,
+            account,
+            ct.id,
+            enabled=True,
+            history_window="all",
+            history_since=None,
+            history_message_cap=None,
+        )
+        db_session.refresh(ct)
+        assert not ct.history_complete and ct.history_synced_count == 0
+        await service.sync_account(db_session, scope, account, connector, secret_box)
+        assert db_session.query(orm.SourceMessage).count() == 10
+
+
 class TestDisconnect:
     async def test_logout_clears_session_but_keeps_transcripts(
         self, db_session, scope, connector, fake, secret_box

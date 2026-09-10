@@ -27,6 +27,8 @@ logger = logging.getLogger("montauk.connectors")
 
 _HISTORY_PAGE = 200
 _HISTORY_PAGE_BUDGET = 12  # pages per sync tick, so one thread can't hog the loop
+_REDISCOVER_EVERY = dt.timedelta(minutes=2)
+_last_discover: dict[uuid.UUID, dt.datetime] = {}
 
 
 class ConnectorConfigError(RuntimeError):
@@ -189,6 +191,13 @@ async def discover(
     return len(threads)
 
 
+def _is_bare_identifier(title: str) -> bool:
+    """A title that is really just a phone number or a raw JID -- i.e. we
+    don't have a name for this conversation yet."""
+    t = (title or "").strip().lstrip("+")
+    return not t or t.replace(" ", "").isdigit() or "@" in t
+
+
 def _upsert_thread(
     session: Session,
     account: orm.ConnectorAccount,
@@ -210,7 +219,10 @@ def _upsert_thread(
         session.add(row)
         session.flush()
         return row
-    row.title = d.title or row.title
+    # A name that arrives later (from a pushName / address-book sync) should
+    # replace a bare phone number, but not the other way around.
+    if d.title and (not _is_bare_identifier(d.title) or _is_bare_identifier(row.title)):
+        row.title = d.title
     row.is_group = d.is_group
     if participants:
         row.participants = participants
@@ -219,6 +231,29 @@ def _upsert_thread(
     if d.message_estimate is not None:
         row.message_estimate = d.message_estimate
     return row
+
+
+_HISTORY_BOUNDS = ("new", "days", "count", "all")
+
+
+def resolve_history_bound(
+    bound: str, *, days: int | None = None, count: int | None = None
+) -> tuple[str, dt.datetime | None, int | None]:
+    """Map a dashboard choice to (history_window, history_since, cap).
+
+    - ``new``   -> nothing before enablement
+    - ``days``  -> messages newer than N days
+    - ``count`` -> the most recent N messages
+    - ``all``   -> everything the linked device can reach
+    """
+    if bound == "new":
+        return "future_only", None, None
+    if bound == "days":
+        n = max(1, int(days or 30))
+        return "since_date", dt.datetime.now(dt.UTC) - dt.timedelta(days=n), None
+    if bound == "count":
+        return "all", None, max(1, int(count or 500))
+    return "all", None, None
 
 
 def set_thread_enabled(
@@ -230,6 +265,7 @@ def set_thread_enabled(
     enabled: bool,
     history_window: str = "all",
     history_since: dt.datetime | None = None,
+    history_message_cap: int | None = None,
 ) -> orm.ConnectorThread:
     row = session.execute(
         select(orm.ConnectorThread)
@@ -238,14 +274,23 @@ def set_thread_enabled(
     ).scalar_one_or_none()
     if row is None:
         raise ConnectorError("no such thread on this account")
-    if enabled and not row.enabled:
+    if enabled:
+        reconfigured = (
+            not row.enabled
+            or row.history_window != history_window
+            or row.history_since != history_since
+            or row.history_message_cap != history_message_cap
+        )
         row.enabled = True
-        row.enabled_at = dt.datetime.now(dt.UTC)
-        row.history_window = history_window
-        row.history_since = history_since
-        row.history_complete = history_window == "future_only"
-        row.history_cursor = None
-    elif not enabled:
+        row.enabled_at = row.enabled_at or dt.datetime.now(dt.UTC)
+        if reconfigured:
+            row.history_window = history_window
+            row.history_since = history_since
+            row.history_message_cap = history_message_cap
+            row.history_complete = history_window == "future_only"
+            row.history_cursor = None
+            row.history_synced_count = 0
+    else:
         row.enabled = False
     session.commit()
     return row
@@ -291,6 +336,16 @@ async def sync_account(
     if account.status not in ("connected", "degraded"):
         session.commit()
         return {"live": 0, "history": 0}
+
+    # Re-discover periodically: names (pushName / address-book sync) arrive
+    # asynchronously after linking, so titles improve over the first minutes.
+    now = dt.datetime.now(dt.UTC)
+    if now - _last_discover.get(account.id, dt.datetime.min.replace(tzinfo=dt.UTC)) > _REDISCOVER_EVERY:
+        _last_discover[account.id] = now
+        try:
+            await discover(session, scope, account, connector)
+        except ConnectorError:
+            pass
 
     enabled = {
         t.provider_thread_id: t
@@ -338,17 +393,23 @@ async def _backfill_thread(
         ct.history_complete = True
         return 0
     floor = ct.history_since if ct.history_window == "since_date" else None
+    cap = ct.history_message_cap
     added = 0
     for _ in range(_HISTORY_PAGE_BUDGET):
-        page = await connector.fetch_history(
-            ct.provider_thread_id, cursor=ct.history_cursor, limit=_HISTORY_PAGE
-        )
+        remaining = None if cap is None else max(0, cap - ct.history_synced_count)
+        if remaining == 0:
+            ct.history_complete = True
+            break
+        limit = _HISTORY_PAGE if remaining is None else min(_HISTORY_PAGE, remaining)
+        page = await connector.fetch_history(ct.provider_thread_id, cursor=ct.history_cursor, limit=limit)
         batch = [m for m in page.messages if floor is None or m.sent_at >= floor]
         if batch:
             added += archive_messages(session, scope, account, ct, batch).new_messages
+            ct.history_synced_count += len(batch)
         ct.history_cursor = page.next_cursor
         hit_floor = floor is not None and any(m.sent_at < floor for m in page.messages)
-        if page.done or hit_floor or page.next_cursor is None:
+        hit_cap = cap is not None and ct.history_synced_count >= cap
+        if page.done or hit_floor or hit_cap or page.next_cursor is None:
             ct.history_complete = True
             break
         session.flush()
@@ -362,15 +423,32 @@ async def _backfill_thread(
 class ConnectorThreadView:
     id: uuid.UUID
     title: str
+    phone: str | None
+    has_name: bool
     is_group: bool
     participant_names: list[str]
     last_message_at: dt.datetime | None
     message_estimate: int | None
     enabled: bool
     history_window: str
+    history_message_cap: int | None
     history_complete: bool
     archived_messages: int
     source_thread_id: uuid.UUID | None
+
+    @property
+    def search_key(self) -> str:
+        return f"{self.title} {self.phone or ''} {' '.join(self.participant_names)}".lower()
+
+    @property
+    def history_label(self) -> str:
+        if self.history_window == "future_only":
+            return "new messages only"
+        if self.history_window == "since_date":
+            return "recent history"
+        if self.history_message_cap:
+            return f"last {self.history_message_cap} messages"
+        return "all history"
 
 
 @dataclass
@@ -388,6 +466,14 @@ class ConnectorAccountView:
     @property
     def enabled_threads(self) -> int:
         return sum(1 for t in self.threads if t.enabled)
+
+    @property
+    def monitored(self) -> list[ConnectorThreadView]:
+        return [t for t in self.threads if t.enabled]
+
+    @property
+    def available(self) -> list[ConnectorThreadView]:
+        return [t for t in self.threads if not t.enabled]
 
     @property
     def is_live(self) -> bool:
@@ -417,12 +503,17 @@ def account_view(session: Session, workspace_id: uuid.UUID) -> ConnectorAccountV
         ConnectorThreadView(
             id=r.id,
             title=r.title,
+            phone=jid_to_phone(r.provider_thread_id),
+            has_name=not _is_bare_identifier(r.title),
             is_group=r.is_group,
-            participant_names=[p.get("name") or p.get("jid") for p in (r.participants or [])],
+            participant_names=[
+                p.get("name") or p.get("jid") for p in (r.participants or []) if not p.get("is_self")
+            ],
             last_message_at=r.last_message_at,
             message_estimate=r.message_estimate,
             enabled=r.enabled,
             history_window=r.history_window,
+            history_message_cap=r.history_message_cap,
             history_complete=r.history_complete,
             archived_messages=int(counts.get(r.source_thread_id, 0)) if r.source_thread_id else 0,
             source_thread_id=r.source_thread_id,

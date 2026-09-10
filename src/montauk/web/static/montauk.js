@@ -83,6 +83,54 @@
     sync();
   });
 
+  // Connectors › add-a-conversation: live-filter the candidate list and keep
+  // the hidden days/count inputs in sync with the chosen history option.
+  // Without JS the full list shows (first 60 rows) and the default is 30 days.
+  document.querySelectorAll("[data-thread-picker]").forEach(function (picker) {
+    var input = picker.querySelector("[data-thread-filter]");
+    var rows = Array.prototype.slice.call(picker.querySelectorAll("[data-thread-row]"));
+    var moreMsg = picker.querySelector("[data-thread-morecount]");
+    var CAP = 60;
+
+    function apply() {
+      var q = (input.value || "").trim().toLowerCase();
+      var shown = 0;
+      var matched = 0;
+      rows.forEach(function (row) {
+        var hit = !q || (row.getAttribute("data-search") || "").indexOf(q) !== -1;
+        if (hit) {
+          matched++;
+          row.hidden = shown >= CAP;
+          if (shown < CAP) shown++;
+        } else {
+          row.hidden = true;
+        }
+      });
+      if (moreMsg) {
+        if (matched > CAP) {
+          moreMsg.textContent = "Showing " + CAP + " of " + matched + " — keep typing to narrow it down.";
+          moreMsg.hidden = false;
+        } else {
+          moreMsg.hidden = true;
+        }
+      }
+    }
+    if (input) input.addEventListener("input", apply);
+    apply();
+
+    picker.querySelectorAll("form[data-add-form]").forEach(function (form) {
+      var sel = form.querySelector('select[name="bound"]');
+      var days = form.querySelector('input[name="days"]');
+      var count = form.querySelector('input[name="count"]');
+      if (!sel) return;
+      sel.addEventListener("change", function () {
+        var opt = sel.options[sel.selectedIndex];
+        if (opt.dataset.days && days) days.value = opt.dataset.days;
+        if (opt.dataset.count && count) count.value = opt.dataset.count;
+      });
+    });
+  });
+
   // Connectors › WhatsApp pairing: poll for the rotating QR code and jump to
   // the connectors page once the phone links. Without JS the page explains
   // that a manual reload is needed.

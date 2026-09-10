@@ -22,7 +22,7 @@ from ..deps import csrf_protect, page_context, require_auth, workspace_scope
 
 router = APIRouter(prefix="/connectors")
 
-_HISTORY_WINDOWS = ("all", "since_date", "future_only")
+_HISTORY_BOUNDS = ("new", "days", "count", "all")
 
 
 def _ctx(request: Request, auth: AuthContext, session: Session, **extra: object) -> dict:
@@ -171,15 +171,34 @@ async def toggle_thread(
         return _redirect("Connect WhatsApp first.", error=True)
     form = await request.form()
     enabled = str(form.get("enabled", "")) == "1"
-    window = str(form.get("history_window", "all"))
-    if window not in _HISTORY_WINDOWS:
-        window = "all"
+    bound = str(form.get("bound", "days"))
+    if bound not in _HISTORY_BOUNDS:
+        bound = "days"
+
+    def _int(name: str) -> int | None:
+        try:
+            return int(str(form.get(name, "")))
+        except ValueError:
+            return None
+
+    window, since, cap = service.resolve_history_bound(bound, days=_int("days"), count=_int("count"))
     try:
-        service.set_thread_enabled(session, scope, account, thread_id, enabled=enabled, history_window=window)
+        service.set_thread_enabled(
+            session,
+            scope,
+            account,
+            thread_id,
+            enabled=enabled,
+            history_window=window,
+            history_since=since,
+            history_message_cap=cap,
+        )
     except ConnectorError as exc:
         return _redirect(str(exc), error=True)
     return _redirect(
-        "Thread enabled -- history will sync on the next pass." if enabled else "Thread disabled."
+        "Added -- messages sync on the next pass (a minute or two)."
+        if enabled
+        else "Removed from monitoring."
     )
 
 

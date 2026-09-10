@@ -3,27 +3,26 @@
 {% block body %}
   <h1>Inbound connectors</h1>
   <p class="muted">Connectors <strong>only read</strong>. Montauk archives both sides of the
-    conversations you enable and never sends, replies, or marks anything read.</p>
+    conversations you monitor and never sends, replies, or marks anything read.</p>
 
   {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
   {% if notice %}<div class="notice">{{ notice }}</div>{% endif %}
 
+  {% set a = account %}
   <div class="card">
     <h2>WhatsApp <span class="muted">&mdash; unofficial linked device</span></h2>
-    <p class="muted">This uses an unofficial WhatsApp linked-device implementation (Baileys). It
-      can break when WhatsApp changes its protocol; the manual
+    <p class="muted">Uses an unofficial WhatsApp linked-device implementation (Baileys); it can break
+      when WhatsApp changes its protocol. The manual
       <a href="/transcripts">chat-export importer</a> is always available as a fallback.</p>
 
     {% if not sidecar_configured %}
       <div class="notice"><strong>The WhatsApp sidecar is not running on this deployment.</strong>
-        Start the <code>montauk-whatsapp</code> service and set
-        <code>MONTAUK_WA_SIDECAR_TOKEN</code> / <code>MONTAUK_WA_SIDECAR_URL</code>, then reload.</div>
+        Start <code>montauk-whatsapp</code> and set <code>MONTAUK_WA_SIDECAR_TOKEN</code>.</div>
     {% elif not master_key_present %}
       <div class="notice"><strong>Set <code>MONTAUK_MASTER_KEY</code> first.</strong> The linked-device
-        session is stored encrypted; without a master key it cannot be saved.</div>
+        session is stored encrypted.</div>
     {% endif %}
 
-    {% set a = account %}
     {% if not a or a.status in ('unconfigured', 'disconnected') %}
       <p>Status: <strong>{{ a.status if a else 'not connected' }}</strong>
         {% if a and a.last_error %}<span class="muted">&mdash; {{ a.last_error }}</span>{% endif %}</p>
@@ -37,8 +36,7 @@
         {% if a.self_phone %}&middot; connected as {{ a.self_phone }}{% endif %}
         {% if a.self_display_name %}({{ a.self_display_name }}){% endif %}</p>
       <p class="muted">
-        {{ a.enabled_threads }} of {{ a.threads|length }} conversation(s) enabled &middot;
-        last sync {{ a.last_sync_at|humantime }}
+        {{ a.monitored|length }} conversation(s) monitored &middot; last sync {{ a.last_sync_at|humantime }}
         {%- if a.last_error %} &middot; <span class="notice-inline">{{ a.last_error }}</span>{% endif %}
       </p>
       <form method="post" action="/connectors/whatsapp/sync" class="inline">
@@ -49,39 +47,33 @@
         <input type="hidden" name="_csrf" value="{{ csrf }}">
         <button type="submit" class="secondary">Refresh conversation list</button>
       </form>
-      {% if a.status == 'pairing' %}
-        <p><a href="/connectors/whatsapp/pair">Finish pairing &rarr;</a></p>
-      {% endif %}
+      {% if a.status == 'pairing' %}<p><a href="/connectors/whatsapp/pair">Finish pairing &rarr;</a></p>{% endif %}
     {% endif %}
   </div>
 
-  {% if account and account.threads %}
+  {% if a and a.is_live %}
   <div class="card">
-    <h2>Conversations</h2>
-    <p class="muted">Nothing is archived until you enable a conversation (spec: selection before
-      content storage). Enabling pulls <strong>all available history</strong> plus new messages;
-      the messages then appear in <a href="/transcripts">Transcripts</a> to map and extract.</p>
+    <h2>Monitored conversations</h2>
+    {% if a.monitored %}
     <div class="scroll-x">
     <table>
-      <thead><tr><th>Conversation</th><th>Type</th><th>Last message</th><th>Archived</th><th>History</th><th></th></tr></thead>
+      <thead><tr><th>Conversation</th><th>Type</th><th>Archiving</th><th>Archived</th><th></th></tr></thead>
       <tbody>
-      {% for t in account.threads %}
+      {% for t in a.monitored %}
         <tr>
           <td>
             {% if t.source_thread_id %}<a href="/transcripts/{{ t.source_thread_id }}">{{ t.title }}</a>
             {% else %}{{ t.title }}{% endif %}
-            <div class="muted">{{ t.participant_names[:4]|join(', ') }}{{ '…' if t.participant_names|length > 4 }}</div>
+            {%- if not t.has_name and t.phone %}<div class="muted">{{ t.phone }}</div>{% endif %}
           </td>
           <td>{{ 'group' if t.is_group else 'direct' }}</td>
-          <td>{{ t.last_message_at.strftime('%Y-%m-%d') if t.last_message_at else '—' }}</td>
+          <td>{{ t.history_label }}{{ '' if t.history_complete else ' &middot; syncing…'|safe }}</td>
           <td>{{ t.archived_messages }}</td>
-          <td>{{ 'complete' if t.history_complete else ('syncing…' if t.enabled else '—') }}</td>
           <td>
             <form method="post" action="/connectors/whatsapp/threads/{{ t.id }}" class="inline">
               <input type="hidden" name="_csrf" value="{{ csrf }}">
-              <input type="hidden" name="enabled" value="{{ '0' if t.enabled else '1' }}">
-              <button type="submit" class="{{ 'secondary' if t.enabled else '' }}">
-                {{ 'Disable' if t.enabled else 'Enable' }}</button>
+              <input type="hidden" name="enabled" value="0">
+              <button type="submit" class="secondary">Stop</button>
             </form>
           </td>
         </tr>
@@ -89,13 +81,55 @@
       </tbody>
     </table>
     </div>
+    {% else %}
+      <p class="muted">None yet &mdash; add one below.</p>
+    {% endif %}
+  </div>
+
+  <div class="card" data-thread-picker>
+    <h2>Add a conversation</h2>
+    <p class="muted">Search your {{ a.available|length }} WhatsApp conversation(s), then choose how much
+      history to pull in. Names fill in over the first few minutes after linking &mdash; use
+      <em>Refresh conversation list</em> if one is still showing a number.</p>
+    <input type="search" placeholder="Search by name or number…" data-thread-filter
+           aria-label="Filter conversations" autocomplete="off" style="width:100%;max-width:28rem">
+    <div class="scroll-x" style="max-height:26rem;overflow-y:auto;margin-top:.5rem">
+    <table>
+      <thead><tr><th>Conversation</th><th>Type</th><th>Last message</th><th>History to pull</th><th></th></tr></thead>
+      <tbody>
+      {% for t in a.available %}
+        <tr data-thread-row data-search="{{ t.search_key }}" {{ 'hidden' if loop.index0 >= 60 }}>
+          <td>{{ t.title }}{% if not t.has_name and t.phone %}<div class="muted">{{ t.phone }}</div>{% endif %}</td>
+          <td>{{ 'group' if t.is_group else 'direct' }}</td>
+          <td>{{ t.last_message_at.strftime('%Y-%m-%d') if t.last_message_at else '—' }}</td>
+          <td>
+            <form method="post" action="/connectors/whatsapp/threads/{{ t.id }}" class="inline" data-add-form>
+              <input type="hidden" name="_csrf" value="{{ csrf }}">
+              <input type="hidden" name="enabled" value="1">
+              <select name="bound" aria-label="History to pull">
+                <option value="days" data-days="30" selected>Last 30 days</option>
+                <option value="days" data-days="90">Last 90 days</option>
+                <option value="count" data-count="500">Last 500 messages</option>
+                <option value="count" data-count="2000">Last 2000 messages</option>
+                <option value="new">New messages only</option>
+                <option value="all">Everything available</option>
+              </select>
+              <input type="hidden" name="days" value="30">
+              <input type="hidden" name="count" value="500">
+          </td>
+          <td><button type="submit">Add</button></form></td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+    </div>
+    <p class="muted" data-thread-morecount hidden></p>
   </div>
 
   <div class="card">
     <h2>Disconnect</h2>
     <p class="muted">Disconnecting stops syncing but keeps every archived transcript and extracted
-      fact. Unlinking also removes this device from your phone's WhatsApp and clears the stored
-      session (you'd re-scan the QR to reconnect).</p>
+      fact. Unlinking also removes this device from your phone's WhatsApp and clears the session.</p>
     <form method="post" action="/connectors/whatsapp/disconnect" class="inline">
       <input type="hidden" name="_csrf" value="{{ csrf }}">
       <button type="submit" class="secondary">Disconnect</button>

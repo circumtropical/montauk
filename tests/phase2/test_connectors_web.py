@@ -80,12 +80,17 @@ def test_full_pair_discover_enable_sync_flow(client, fake, wired):
 
     page = client.get("/connectors").text
     assert "Robin Vega" in page and "connected as +15550001111" in page
+    assert "Add a conversation" in page and "data-thread-filter" in page
 
-    # enable the thread, push a message, sync
+    # add the thread to monitoring with a bound, push a message, sync
     import re
 
     tid = re.search(r"/connectors/whatsapp/threads/([0-9a-f-]{36})", page).group(1)
-    client.post(f"/connectors/whatsapp/threads/{tid}", data={"_csrf": _csrf(client), "enabled": "1"})
+    client.post(
+        f"/connectors/whatsapp/threads/{tid}",
+        data={"_csrf": _csrf(client), "enabled": "1", "bound": "count", "count": "500"},
+    )
+    assert "Monitored conversations" in client.get("/connectors").text
     fake.push_live(msg("L1", ROBIN, text="dinner Friday?"))
     client.post("/connectors/whatsapp/sync", data={"_csrf": _csrf(client)})
 

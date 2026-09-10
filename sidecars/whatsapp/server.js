@@ -42,7 +42,7 @@ const S = {
   qrExpiresAt: 0,
   lastError: null,
   chats: new Map(), // jid -> { jid, name, is_group, last_ts }
-  contacts: new Map(), // jid -> name
+  contacts: new Map(), // jid -> { name, notify }  (address-book name / pushName)
   history: new Map(), // jid -> [msg,...] asc by ts, deduped by id
   live: [], // [{ seq, msg }]
   liveSeq: 0,
@@ -108,8 +108,31 @@ function serializeAuth() {
 
 // ---- message normalisation --------------------------------------------
 
+function learnContact(jid, { name, notify } = {}) {
+  if (!jid || jid === "status@broadcast" || jid.endsWith("@g.us")) return;
+  const cur = S.contacts.get(jid) || {};
+  const next = {
+    name: name || cur.name || "",
+    notify: notify || cur.notify || "",
+  };
+  S.contacts.set(jid, next);
+  // a better name for a direct chat should surface in the thread list
+  const best = next.name || next.notify;
+  if (best) {
+    const chat = S.chats.get(jid);
+    if (!chat || !chat.name || chat.name === jid || /^\+?\d[\d ]*$/.test(chat.name)) {
+      rememberChat(jid, { name: best });
+    }
+  }
+}
+
+function contactName(jid) {
+  const c = S.contacts.get(jid) || {};
+  return c.name || c.notify || "";
+}
+
 function senderName(jid, pushName) {
-  return pushName || S.contacts.get(jid) || "";
+  return pushName || contactName(jid) || "";
 }
 
 function normalize(m) {
@@ -156,7 +179,7 @@ function rememberChat(jid, patch = {}) {
   if (!jid || jid === "status@broadcast") return;
   const cur = S.chats.get(jid) || {
     jid,
-    name: S.contacts.get(jid) || jid,
+    name: contactName(jid) || "",
     is_group: jid.endsWith("@g.us"),
     last_ts: 0,
   };
@@ -238,21 +261,46 @@ function startSocket() {
     }
   });
 
-  sock.ev.on("contacts.upsert", (cs) => cs.forEach((c) => c.id && S.contacts.set(c.id, c.name || c.notify || S.contacts.get(c.id) || "")));
-  sock.ev.on("contacts.update", (cs) => cs.forEach((c) => c.id && c.name && S.contacts.set(c.id, c.name)));
-  sock.ev.on("chats.upsert", (cs) => cs.forEach((c) => rememberChat(c.id, { name: c.name || undefined })));
-  sock.ev.on("chats.update", (cs) => cs.forEach((c) => c.id && rememberChat(c.id, c.name ? { name: c.name } : {})));
+  const learnFromContacts = (cs) =>
+    (cs || []).forEach(
+      (c) => c.id && learnContact(c.id, { name: c.name || c.verifiedName, notify: c.notify }),
+    );
+  sock.ev.on("contacts.upsert", learnFromContacts);
+  sock.ev.on("contacts.update", learnFromContacts);
+  sock.ev.on("chats.upsert", (cs) =>
+    cs.forEach((c) => {
+      if (c.name) learnContact(c.id, { name: c.name });
+      rememberChat(c.id, c.name ? { name: c.name } : {});
+    }),
+  );
+  sock.ev.on("chats.update", (cs) =>
+    cs.forEach((c) => c.id && c.name && (learnContact(c.id, { name: c.name }), rememberChat(c.id, { name: c.name }))),
+  );
+
+  const learnFromMessage = (m) => {
+    const jid = m.key?.remoteJid || "";
+    if (m.pushName && !m.key?.fromMe) {
+      learnContact(m.key?.participant || jid, { notify: m.pushName });
+    }
+  };
 
   sock.ev.on("messaging-history.set", ({ chats, contacts, messages }) => {
-    (contacts || []).forEach((c) => c.id && S.contacts.set(c.id, c.name || c.notify || S.contacts.get(c.id) || ""));
-    (chats || []).forEach((c) => rememberChat(c.id, { name: c.name || undefined }));
-    (messages || []).forEach((m) => storeHistory(normalize(m)));
+    learnFromContacts(contacts);
+    (chats || []).forEach((c) => {
+      if (c.name) learnContact(c.id, { name: c.name });
+      rememberChat(c.id, c.name ? { name: c.name } : {});
+    });
+    (messages || []).forEach((m) => {
+      learnFromMessage(m);
+      storeHistory(normalize(m));
+    });
     log.info({ chats: chats?.length, messages: messages?.length }, "history batch");
   });
 
   sock.ev.on("messages.upsert", ({ messages, type }) => {
     for (const m of messages || []) {
       if (!m.message && !m.key?.fromMe) continue;
+      learnFromMessage(m);
       const norm = normalize(m);
       storeHistory(norm);
       if (type === "notify") pushLive(norm);
@@ -316,14 +364,16 @@ app.get("/threads", (_req, res) => {
     .filter((c) => c.jid && c.jid !== "status@broadcast")
     .map((c) => {
       const isGroup = c.jid.endsWith("@g.us");
+      const name = c.name || contactName(c.jid) || "";
       const parts = [];
       if (!isGroup) {
-        parts.push({ jid: c.jid, name: c.name || S.contacts.get(c.jid) || "", is_me: false });
+        parts.push({ jid: c.jid, name, is_me: false });
         if (S.self) parts.push({ jid: S.self.jid, name: S.self.name, is_me: true });
       }
       return {
         jid: c.jid,
-        name: c.name || S.contacts.get(c.jid) || c.jid,
+        name: name || jidToPhone(c.jid) || c.jid,
+        phone: isGroup ? null : jidToPhone(c.jid),
         is_group: isGroup,
         participants: parts,
         last_ts: c.last_ts || null,
