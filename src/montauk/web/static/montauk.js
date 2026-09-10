@@ -42,6 +42,28 @@
     });
   });
 
+  // Transcripts › extraction progress: poll the status endpoint while a
+  // background run is in flight and update the "X / Y" counter; reload the
+  // page (to show the new facts) when it finishes. Without JS the page still
+  // shows the count at load time and can be refreshed by hand.
+  document.querySelectorAll("[data-extract-status]").forEach(function (el) {
+    var url = el.getAttribute("data-url");
+    function tick() {
+      fetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } })
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          el.textContent = "Extracting… " + d.processed + " / " + d.total + " messages processed";
+          if (d.active) {
+            setTimeout(tick, 2000);
+          } else {
+            location.reload();
+          }
+        })
+        .catch(function () { setTimeout(tick, 4000); });
+    }
+    setTimeout(tick, 1500);
+  });
+
   // Transcripts › participant mapping: only show the person picker when the
   // role is "a person". Without JS both selects are always visible.
   document.querySelectorAll("select[data-participant-role]").forEach(function (roleSel) {

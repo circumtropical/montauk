@@ -339,6 +339,23 @@ class TestDashboard:
         assert "An extraction model is required" in html
         assert 'action="/transcripts/import"' not in html
 
+    def test_status_endpoint_reports_counts(self, client, db_session):
+        self._setup(client)
+        from montauk.db.repositories import Actor, WorkspaceScope
+        from montauk.services.workspace import get_or_create_workspace
+
+        ws = get_or_create_workspace(db_session, "Personal")
+        db_session.flush()
+        scope = WorkspaceScope(db_session, ws.id, Actor("owner", "o"))
+        imp = transcripts.import_whatsapp(
+            db_session, scope, filename="c.txt", content=_export(DAY1, DAY2), created_by=None
+        )
+        db_session.commit()
+
+        s = client.get(f"/transcripts/{imp.thread_id}/extract/status").json()
+        assert s["active"] is False
+        assert s["processed"] == 0 and s["remaining"] == s["total"] > 0
+
     def test_upload_then_map_then_extract(self, client, session_maker, monkeypatch):
         self._setup(client)
         csrf = self._csrf(client, "/settings")
@@ -385,12 +402,26 @@ class TestDashboard:
         )
         client.post(f"{base}/participants", data={"_csrf": csrf, "participant_id": pid_alex, "role": "owner"})
 
-        # run extraction
+        # kick off extraction -- runs as a background job, redirects immediately
         csrf = self._csrf(client, base)
-        r = client.post(f"{base}/extract", data={"_csrf": csrf}, follow_redirects=True)
-        assert "ok:" in r.text or "partial:" in r.text
-        assert "2 fact" in r.text
+        r = client.post(f"{base}/extract", data={"_csrf": csrf}, follow_redirects=False)
+        assert r.status_code == 303 and "extracting=1" in r.headers["location"]
 
+        # poll the status endpoint until the job finishes (each request pumps
+        # the event loop so the background task can advance)
+        import time
+
+        for _ in range(100):
+            s = client.get(f"{base}/extract/status").json()
+            if not s["active"]:
+                break
+            time.sleep(0.05)
+        assert s["active"] is False
+        assert s["processed"] >= 1 and s["total"] == s["processed"] + s["remaining"]
+
+        # the finished summary shows on the page, and the fact is on the person
+        page = client.get(base).text
+        assert "fact(s)" in page  # the extraction summary notice
         assert "Coastal Studios" in client.get("/people/P0001").text
 
 

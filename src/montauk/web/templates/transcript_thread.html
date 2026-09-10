@@ -12,7 +12,7 @@
 
   {% if error %}<div class="notice error" role="alert">{{ error }}</div>{% endif %}
   {% if just_imported %}<div class="notice">Import complete. Map any unmapped participants below, then run extraction.</div>{% endif %}
-  {% if extraction_result %}<div class="notice"><strong>Extraction:</strong> {{ extraction_result }}</div>{% endif %}
+  {% if extraction_summary and not extraction_active %}<div class="notice"><strong>Extraction:</strong> {{ extraction_summary }}</div>{% endif %}
 
   <div class="card">
     <h2>Participants</h2>
@@ -59,21 +59,29 @@
     </div>
   </div>
 
+  {% set to_process = view.processed + view.awaiting_processing %}
   <div class="card">
     <h2>Extraction</h2>
-    {% if not extraction_configured %}
+    {% if extraction_active %}
+      <p><span class="spinner" aria-hidden="true"></span>
+        <strong data-extract-status data-url="/transcripts/{{ view.id }}/extract/status"
+                aria-live="polite">Extracting&hellip; {{ view.processed }} / {{ to_process }} messages processed</strong></p>
+      <p class="muted">This runs in the background &mdash; you can leave this page. Facts are added
+        with <em>automatically extracted</em> authority (an owner or agent edit always wins). The page
+        refreshes when it finishes.</p>
+    {% elif not extraction_configured %}
       <div class="notice"><strong>No extraction model configured.</strong>
         Set one in <a href="/settings">Settings &rarr; Model &amp; provider</a> to process the
         {{ view.awaiting_processing }} pending message{{ 's' if view.awaiting_processing != 1 }}.</div>
     {% elif view.mapped_people == 0 %}
       <p class="muted">Map at least one participant to a person above, then extraction can run.</p>
     {% elif view.awaiting_processing == 0 %}
-      <p class="muted">Nothing pending &mdash; every message has been processed. Import a newer export to add more.</p>
+      <p class="muted">Nothing pending &mdash; all {{ view.processed }} message{{ 's' if view.processed != 1 }}
+        processed. Import a newer export to add more.</p>
     {% else %}
-      <p class="muted">{{ view.awaiting_processing }} message{{ 's' if view.awaiting_processing != 1 }}
-        awaiting extraction, in day-batches. Facts are added with <em>automatically extracted</em>
-        authority (an owner or agent edit always wins). A large first run processes a capped number of
-        days &mdash; click again to continue.</p>
+      <p class="muted">{{ view.processed }} / {{ to_process }} messages processed.
+        The rest are extracted in local-calendar-day batches; facts are added with
+        <em>automatically extracted</em> authority (an owner or agent edit always wins).</p>
       <form method="post" action="/transcripts/{{ view.id }}/extract" class="inline">
         <input type="hidden" name="_csrf" value="{{ csrf }}">
         <button type="submit">Run extraction ({{ view.awaiting_processing }} pending)</button>

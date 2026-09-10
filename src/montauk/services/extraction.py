@@ -178,6 +178,12 @@ async def run_extraction(
     days = sorted(by_day)
 
     for day in days[:max_days]:
+        try:
+            llm_usage.ensure_within_budget(session, ws, settings)  # type: ignore[arg-type]
+        except LLMBudgetExceeded as exc:
+            result.status = "partial" if result.days_processed else "budget_exceeded"
+            result.note = str(exc)
+            break
         msgs = by_day[day]
         # Every mapped person gets their current facts in context (small n).
         context_blocks = []

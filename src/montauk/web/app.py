@@ -8,8 +8,10 @@ a separate increment.
 from __future__ import annotations
 
 import datetime as dt
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.responses import RedirectResponse
@@ -45,6 +47,11 @@ class AppState:
         self.secure_cookies = secure_cookies
         self._secret_box: SecretBox | None = None
         self._secret_box_loaded = False
+        # In-flight background jobs (transcript extraction), keyed by thread id.
+        # In-memory: a process restart cancels the run and clears this -- the
+        # partial progress is durable (each day-batch commits), so the user
+        # just clicks again.
+        self.extraction_jobs: dict[uuid.UUID, dict[str, Any]] = {}
 
     @property
     def secret_box(self) -> SecretBox | None:
