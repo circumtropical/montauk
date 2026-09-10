@@ -4,7 +4,6 @@ people, and run the extraction model over the new messages (spec 14-17)."""
 from __future__ import annotations
 
 import asyncio
-import datetime as dt
 import logging
 import uuid
 
@@ -12,6 +11,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.datastructures import FormData
 from starlette.datastructures import UploadFile as StarletteUploadFile
 
 from ...db import models as orm
@@ -91,8 +91,8 @@ def thread_page(
     session: Session = Depends(db_session),
     scope: WorkspaceScope = Depends(workspace_scope),
     imported: int = 0,
-    extracting: int = 0,
     error: str | None = None,
+    saved: int = 0,
 ) -> HTMLResponse:
     try:
         view = transcripts.get_thread(session, scope, thread_id)
@@ -110,34 +110,21 @@ def thread_page(
             view=view,
             people=people,
             just_imported=bool(imported),
+            just_saved=bool(saved),
             error=error,
-            extraction_active=bool(job.get("active")) or bool(extracting),
+            extraction_active=bool(job.get("active")),
             extraction_summary=job.get("summary"),
         ),
     )
 
 
-@router.post("/{thread_id}/participants", dependencies=[Depends(csrf_protect)])
-async def set_mapping(
-    thread_id: uuid.UUID,
-    request: Request,
-    auth: AuthContext = Depends(require_auth),
-    session: Session = Depends(db_session),
-    scope: WorkspaceScope = Depends(workspace_scope),
-) -> Response:
-    form = await request.form()
-    try:
-        transcripts.map_participant(
-            session,
-            scope,
-            thread_id,
-            uuid.UUID(str(form.get("participant_id"))),
-            role=str(form.get("role", "unmapped")),
-            person_public_id=(str(form.get("person_id", "")).strip() or None),
-        )
-    except (TranscriptError, ValueError) as exc:
-        return _thread_err(thread_id, str(exc))
-    return RedirectResponse(f"/transcripts/{thread_id}", status_code=303)
+def _read_mappings(form: FormData, participant_ids: set[str]) -> dict[str, tuple[str, str | None]]:
+    out: dict[str, tuple[str, str | None]] = {}
+    for pid in participant_ids:
+        role = str(form.get(f"role_{pid}", "unmapped"))
+        person = str(form.get(f"person_{pid}", "")).strip() or None
+        out[pid] = (role, person)
+    return out
 
 
 def _message_counts(session: Session, thread_id: uuid.UUID) -> dict[str, int]:
@@ -188,22 +175,36 @@ async def do_extract(
     scope: WorkspaceScope = Depends(workspace_scope),
 ) -> Response:
     try:
-        transcripts.get_thread(session, scope, thread_id)
+        view = transcripts.get_thread(session, scope, thread_id)
     except TranscriptError:
         return RedirectResponse("/transcripts", status_code=303)
+
+    # The transcript page has one form: participant roles + the run button.
+    # Save the mapping here, then start extraction if it can run.
+    form = await request.form()
+    errors = transcripts.apply_participant_mappings(
+        session, scope, thread_id, _read_mappings(form, {str(p.id) for p in view.participants})
+    )
+    session.commit()
+    if errors:
+        return _thread_err(thread_id, "; ".join(errors))
+
+    view = transcripts.get_thread(session, scope, thread_id)
+    if not model_config.is_configured(session, auth.workspace_id, "extraction"):
+        return _thread_err(thread_id, "Configure an extraction model in Settings first.")
+    if view.mapped_people == 0:
+        return RedirectResponse(f"/transcripts/{thread_id}?saved=1", status_code=303)
+    if view.awaiting_processing == 0:
+        return RedirectResponse(f"/transcripts/{thread_id}?saved=1", status_code=303)
 
     state = get_state(request)
     job = state.extraction_jobs.get(thread_id)
     if job is None or not job.get("active"):
-        state.extraction_jobs[thread_id] = job = {
-            "active": True,
-            "summary": None,
-            "started_at": dt.datetime.now(dt.UTC),
-        }
+        state.extraction_jobs[thread_id] = job = {"active": True, "summary": None}
         job["task"] = asyncio.create_task(
             _run_extraction_job(state, auth.workspace_id, thread_id, state.secret_box)
         )
-    return RedirectResponse(f"/transcripts/{thread_id}?extracting=1", status_code=303)
+    return RedirectResponse(f"/transcripts/{thread_id}", status_code=303)
 
 
 @router.get("/{thread_id}/extract/status")
@@ -224,7 +225,8 @@ def extract_status(
             **_message_counts(session, thread_id),
             "active": bool(job.get("active")),
             "summary": job.get("summary"),
-        }
+        },
+        headers={"Cache-Control": "no-store"},
     )
 
 

@@ -48,30 +48,37 @@
   // shows the count at load time and can be refreshed by hand.
   document.querySelectorAll("[data-extract-status]").forEach(function (el) {
     var url = el.getAttribute("data-url");
+    var reloaded = false;
     function tick() {
-      fetch(url, { credentials: "same-origin", headers: { Accept: "application/json" } })
+      fetch(url + (url.indexOf("?") < 0 ? "?" : "&") + "t=" + Date.now(), {
+        credentials: "same-origin",
+        cache: "no-store",
+        headers: { Accept: "application/json" },
+      })
         .then(function (r) { return r.json(); })
         .then(function (d) {
           el.textContent = "Extracting… " + d.processed + " / " + d.total + " messages processed";
           if (d.active) {
             setTimeout(tick, 2000);
-          } else {
+          } else if (!reloaded) {
+            reloaded = true;
             location.reload();
           }
         })
         .catch(function () { setTimeout(tick, 4000); });
     }
-    setTimeout(tick, 1500);
+    tick();
   });
 
-  // Transcripts › participant mapping: only show the person picker when the
-  // role is "a person". Without JS both selects are always visible.
+  // Transcripts › participant mapping: show a row's person picker only when
+  // that row's role is "a person". Without JS both selects are visible.
   document.querySelectorAll("select[data-participant-role]").forEach(function (roleSel) {
-    var personSel = roleSel.form && roleSel.form.querySelector("select[data-participant-person]");
+    var row = roleSel.closest("tr") || roleSel.form;
+    var personSel = row && row.querySelector("select[data-participant-person]");
     if (!personSel) return;
-    var wrap = personSel.parentNode;
+    var cell = personSel.closest("td") || personSel.parentNode;
     function sync() {
-      wrap.hidden = roleSel.value !== "person";
+      cell.style.visibility = roleSel.value === "person" ? "" : "hidden";
     }
     roleSel.addEventListener("change", sync);
     sync();

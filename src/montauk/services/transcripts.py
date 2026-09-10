@@ -14,11 +14,12 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..db import models as orm
-from ..db.repositories import WorkspaceScope
+from ..db.repositories import PeopleRepository, WorkspaceScope
 from ..ids import normalize_alias
 from .whatsapp import PARSER_VERSION, parse_whatsapp_export
 
 PLATFORM = "whatsapp_import"
+_OWNER_NAMES = {"you", "me"}
 
 
 class TranscriptError(ValueError):
@@ -46,6 +47,29 @@ def _thread_key(participant_norms: list[str]) -> str:
 def _fingerprint(thread_key: str, sender_norm: str, sent_at: dt.datetime, text: str) -> str:
     payload = "\x1f".join([PLATFORM, thread_key, sender_norm, sent_at.isoformat(), " ".join(text.split())])
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _guess_participant(repo: PeopleRepository, display_name: str, norm: str) -> tuple[str, uuid.UUID | None]:
+    """First-pass guess for a newly-seen sender. WhatsApp labels the
+    exporting user's own messages "You"; other names are matched to an
+    existing person by name/alias when the match is unambiguous."""
+    if norm in _OWNER_NAMES:
+        return "owner", None
+    matches = repo.find_by_name(display_name)
+    if len(matches) == 1:
+        return "person", matches[0].id
+    return "unmapped", None
+
+
+def _guess_owner_from_pair(participants: list[orm.SourceParticipant]) -> None:
+    """In a two-person thread where one side is mapped to a person and the
+    other is still unmapped, the unmapped side is almost certainly the owner."""
+    if len(participants) != 2:
+        return
+    mapped = [p for p in participants if p.role == "person"]
+    unmapped = [p for p in participants if p.role == "unmapped"]
+    if len(mapped) == 1 and len(unmapped) == 1:
+        unmapped[0].role = "owner"
 
 
 def import_whatsapp(
@@ -84,23 +108,29 @@ def import_whatsapp(
         thread.title = title
         thread.updated_at = dt.datetime.now(dt.UTC)
 
-    existing_names = {
-        p.display_name_normalized
+    repo = PeopleRepository(scope)
+    existing = {
+        p.display_name_normalized: p
         for p in session.execute(
             select(orm.SourceParticipant).where(orm.SourceParticipant.thread_id == thread.id)
         ).scalars()
     }
     for name, norm in zip(parsed.participants, norms, strict=True):
-        if norm not in existing_names:
-            session.add(
-                orm.SourceParticipant(
-                    workspace_id=ws,
-                    thread_id=thread.id,
-                    display_name=name,
-                    display_name_normalized=norm,
-                    role="unmapped",
-                )
-            )
+        if norm in existing:
+            continue
+        role, person_id = _guess_participant(repo, name, norm)
+        part = orm.SourceParticipant(
+            workspace_id=ws,
+            thread_id=thread.id,
+            display_name=name,
+            display_name_normalized=norm,
+            role=role,
+            person_id=person_id,
+        )
+        session.add(part)
+        existing[norm] = part
+    session.flush()
+    _guess_owner_from_pair(list(existing.values()))
     session.flush()
 
     imp = orm.SourceImport(
@@ -353,6 +383,42 @@ def map_participant(
         person_uuid = person.id
     part.role = role
     part.person_id = person_uuid
+
+
+def apply_participant_mappings(
+    session: Session,
+    scope: WorkspaceScope,
+    thread_id: uuid.UUID,
+    mappings: dict[str, tuple[str, str | None]],
+) -> list[str]:
+    """Save a whole participant->role/person map at once (the transcript
+    page has one form, saved when the owner runs extraction). Applies every
+    valid entry; returns a list of human-readable problems for the rest."""
+    _require_thread(session, scope, thread_id)
+    parts = {
+        str(p.id): p
+        for p in session.execute(
+            select(orm.SourceParticipant)
+            .where(orm.SourceParticipant.thread_id == thread_id)
+            .where(orm.SourceParticipant.workspace_id == scope.workspace_id)
+        ).scalars()
+    }
+    errors: list[str] = []
+    for pid, (role, person_public_id) in mappings.items():
+        if pid not in parts:
+            continue
+        try:
+            map_participant(
+                session,
+                scope,
+                thread_id,
+                uuid.UUID(pid),
+                role=role,
+                person_public_id=person_public_id,
+            )
+        except (TranscriptError, ValueError) as exc:
+            errors.append(f"{parts[pid].display_name}: {exc}")
+    return errors
 
 
 def delete_thread(session: Session, scope: WorkspaceScope, thread_id: uuid.UUID) -> None:

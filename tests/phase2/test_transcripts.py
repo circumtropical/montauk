@@ -103,6 +103,28 @@ class TestImport:
         with pytest.raises(transcripts.TranscriptError):
             self._import(db_session, scope, b"not a whatsapp export at all")
 
+    def test_guesses_participants_on_import(self, db_session, scope):
+        robin = PeopleRepository(scope).create(Person(id="P0042", name="Robin Vega"))
+        db_session.flush()
+        export = (
+            b"[2026-03-01, 9:00:00 AM] You: hi\n"
+            b"[2026-03-01, 9:01:00 AM] Robin Vega: hello\n"
+            b"[2026-03-01, 9:02:00 AM] Mystery Person: who am i\n"
+        )
+        self._import(db_session, scope, export)
+        roles = {p.display_name: (p.role, p.person_id) for p in db_session.query(orm.SourceParticipant).all()}
+        assert roles["You"][0] == "owner"
+        assert roles["Robin Vega"] == ("person", robin.id)  # name match
+        assert roles["Mystery Person"][0] == "unmapped"  # no match
+
+    def test_guesses_owner_as_the_other_side_of_a_pair(self, db_session, scope):
+        PeopleRepository(scope).create(Person(id="P0001", name="Amanda Dwelley"))
+        db_session.flush()
+        export = b"[2026-03-01, 9:00:00 AM] Joshua: hey\n[2026-03-01, 9:01:00 AM] Amanda Dwelley: hi there\n"
+        self._import(db_session, scope, export)
+        roles = {p.display_name: p.role for p in db_session.query(orm.SourceParticipant).all()}
+        assert roles == {"Joshua": "owner", "Amanda Dwelley": "person"}
+
 
 # --- extraction ---------------------------------------------------------
 
@@ -356,16 +378,15 @@ class TestDashboard:
         assert s["active"] is False
         assert s["processed"] == 0 and s["remaining"] == s["total"] > 0
 
-    def test_upload_then_map_then_extract(self, client, session_maker, monkeypatch):
+    def test_upload_guesses_participants_then_extract(self, client, session_maker, db_session, monkeypatch):
         self._setup(client)
         csrf = self._csrf(client, "/settings")
         client.post(
             "/settings/model/extraction",
             data={"_csrf": csrf, "provider_type": "claude_cli", "model": "claude-haiku-4-5"},
         )
-        # a person to map to
         csrf = self._csrf(client, "/people")
-        client.post("/people", data={"_csrf": csrf, "name": "Robin Vega"})
+        client.post("/people", data={"_csrf": csrf, "name": "Robin Vega"})  # -> P0001
 
         monkeypatch.setattr(
             extraction,
@@ -388,27 +409,28 @@ class TestDashboard:
             follow_redirects=False,
         )
         assert r.status_code == 303, r.text[:800]
-        base = r.headers["location"].split("?")[0]  # /transcripts/<uuid>
+        base = r.headers["location"].split("?")[0]
 
-        # map participants
-        page = client.get(base + "?imported=1").text
-        assert "Import complete" in page
-        pid_alex = _participant_id(page, "Alex")
-        pid_robin = _participant_id(page, "Robin Vega")
+        # the import guessed: "Robin Vega" -> the existing P0001 (name match),
+        # "Alex" -> owner (the other side of a 1:1 with a mapped person)
+        parts = {p.display_name: p for p in db_session.query(orm.SourceParticipant).all()}
+        assert parts["Robin Vega"].role == "person" and parts["Robin Vega"].person_id is not None
+        assert parts["Alex"].role == "owner"
+
+        # submit the one form with the guessed mapping unchanged
         csrf = self._csrf(client, base)
-        client.post(
-            f"{base}/participants",
-            data={"_csrf": csrf, "participant_id": pid_robin, "role": "person", "person_id": "P0001"},
+        r = client.post(
+            f"{base}/extract",
+            data={
+                "_csrf": csrf,
+                f"role_{parts['Robin Vega'].id}": "person",
+                f"person_{parts['Robin Vega'].id}": "P0001",
+                f"role_{parts['Alex'].id}": "owner",
+            },
+            follow_redirects=False,
         )
-        client.post(f"{base}/participants", data={"_csrf": csrf, "participant_id": pid_alex, "role": "owner"})
+        assert r.status_code == 303 and "/extract/status" not in r.headers["location"]
 
-        # kick off extraction -- runs as a background job, redirects immediately
-        csrf = self._csrf(client, base)
-        r = client.post(f"{base}/extract", data={"_csrf": csrf}, follow_redirects=False)
-        assert r.status_code == 303 and "extracting=1" in r.headers["location"]
-
-        # poll the status endpoint until the job finishes (each request pumps
-        # the event loop so the background task can advance)
         import time
 
         for _ in range(100):
@@ -419,14 +441,6 @@ class TestDashboard:
         assert s["active"] is False
         assert s["processed"] >= 1 and s["total"] == s["processed"] + s["remaining"]
 
-        # the finished summary shows on the page, and the fact is on the person
         page = client.get(base).text
-        assert "fact(s)" in page  # the extraction summary notice
+        assert "fact(s)" in page
         assert "Coastal Studios" in client.get("/people/P0001").text
-
-
-def _participant_id(html: str, display_name: str) -> str:
-    # the row's hidden participant_id input sits just after the display name cell
-    i = html.index(">" + display_name + "<")
-    j = html.index('name="participant_id" value="', i) + len('name="participant_id" value="')
-    return html[j : html.index('"', j)]
