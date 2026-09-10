@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 
 from ..db import models as orm
 from ..db.repositories import Actor, WorkspaceScope
@@ -21,6 +22,8 @@ logger = logging.getLogger("montauk.connectors.runner")
 
 ENV_ENABLE = "MONTAUK_RUN_CONNECTORS"
 _DEFAULT_INTERVAL = 10.0
+_RESUME_COOLDOWN = 60.0  # never re-issue /connect for the same account faster than this
+_last_resume: dict[str, float] = {}
 
 
 def runner_enabled() -> bool:
@@ -57,9 +60,17 @@ async def tick(state: object) -> None:
             connector = service.build_connector()
             try:
                 st = await connector.status()
-                if st.state != "connected":
-                    await service.resume(session, scope, account, connector, box)
-                await service.sync_account(session, scope, account, connector, box)
+                # Only re-issue /connect when the sidecar has genuinely lost
+                # the session -- never during a "connecting" handshake, and at
+                # most once a minute, or we churn the socket and WhatsApp
+                # times out its init queries.
+                key = str(account_id)
+                if st.state in ("disconnected", "unconfigured", "degraded"):
+                    if time.monotonic() - _last_resume.get(key, 0.0) > _RESUME_COOLDOWN:
+                        _last_resume[key] = time.monotonic()
+                        await service.resume(session, scope, account, connector, box)
+                if account.status in ("connected", "degraded"):
+                    await service.sync_account(session, scope, account, connector, box)
                 session.commit()
             except Exception:  # noqa: BLE001
                 logger.exception("sync failed for connector account %s", account_id)

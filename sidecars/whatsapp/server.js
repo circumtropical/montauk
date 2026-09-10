@@ -231,10 +231,16 @@ function startSocket() {
       S.qr = await QRCode.toDataURL(qr, { margin: 1, width: 264 });
       S.qrExpiresAt = Date.now() + 60_000;
     }
+    if (connection === "connecting" && S.state !== "connected") {
+      // a transient state -- do NOT report "disconnected" or the driver
+      // will hammer /connect and churn the socket mid-handshake.
+      S.state = S.state === "pairing" ? "pairing" : "connecting";
+    }
     if (connection === "open") {
       S.state = "connected";
       S.qr = null;
       S.lastError = null;
+      S.reconnectDelay = 3000;
       const u2 = sock.user || {};
       S.self = { jid: u2.id, name: u2.name || u2.verifiedName || "", phone: jidToPhone(u2.id) };
       log.info({ self: S.self?.phone }, "whatsapp connected");
@@ -249,13 +255,17 @@ function startSocket() {
         S.self = null;
         log.warn("whatsapp logged out on the phone side");
       } else {
-        S.state = "degraded";
+        // Keep reconnecting ourselves with backoff. Stay "connecting" (not
+        // "disconnected") so the driver leaves us alone while we retry.
+        S.state = S.self ? "connecting" : "degraded";
         if (!S.reconnecting) {
           S.reconnecting = true;
+          const delay = Math.min(S.reconnectDelay || 3000, 60_000);
+          S.reconnectDelay = delay * 2;
           setTimeout(() => {
             S.reconnecting = false;
             startSocket();
-          }, 3000);
+          }, delay);
         }
       }
     }
@@ -334,6 +344,13 @@ app.get("/status", (_req, res) => res.json(statusPayload()));
 
 app.post("/connect", (req, res) => {
   const blob = req.body?.session ?? null;
+  // Idempotent: if a socket is already up (or mid-handshake) on this same
+  // session, leave it alone -- tearing it down mid-init is what causes the
+  // "init queries timed out" / decrypt-counter errors.
+  const busy = S.sock && ["connected", "connecting", "pairing"].includes(S.state);
+  if (busy && (blob ? blob === S.lastLoadedBlob : S.state === "pairing")) {
+    return res.json(statusPayload());
+  }
   try {
     if (S.sock) {
       try { S.sock.ev.removeAllListeners(); } catch {}
@@ -341,10 +358,13 @@ app.post("/connect", (req, res) => {
       S.sock = null;
     }
     loadAuth(blob);
+    S.lastLoadedBlob = blob;
+    S.reconnectDelay = 3000;
     if (!blob) {
       S.state = "pairing";
       S.chats.clear();
       S.history.clear();
+      S.contacts.clear();
       S.live = [];
       S.liveSeq = 0;
     }

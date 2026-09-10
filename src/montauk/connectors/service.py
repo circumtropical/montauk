@@ -89,6 +89,11 @@ def _apply_status(account: orm.ConnectorAccount, st: ConnectorStatus) -> None:
             account.self_display_name = st.self_display_name
     elif st.state == "pairing":
         account.status = "pairing"
+    elif st.state == "connecting":
+        # transient handshake/reconnect -- keep whatever the account was,
+        # unless it was fully unconfigured
+        if account.status == "unconfigured":
+            account.status = "pairing"
     elif st.state in ("degraded", "disconnected"):
         account.status = st.state
     if st.last_error:
