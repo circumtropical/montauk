@@ -16,10 +16,11 @@ import QRCode from "qrcode";
 import {
   makeWASocket,
   initAuthCreds,
+  makeCacheableSignalKeyStore,
   BufferJSON,
   proto,
   DisconnectReason,
-} from "@whiskeysockets/baileys";
+} from "baileys";
 
 const PORT = parseInt(process.env.MONTAUK_WA_SIDECAR_PORT || "8766", 10);
 const HOST = process.env.MONTAUK_WA_SIDECAR_HOST || "127.0.0.1";
@@ -43,20 +44,44 @@ const S = {
   lastError: null,
   chats: new Map(), // jid -> { jid, name, is_group, last_ts }
   contacts: new Map(), // jid -> { name, notify }  (address-book name / pushName)
+  lidToPn: new Map(), // "<n>@lid" -> "<phone>@s.whatsapp.net"
   history: new Map(), // jid -> [msg,...] asc by ts, deduped by id
   live: [], // [{ seq, msg }]
   liveSeq: 0,
   gap: false,
   reconnecting: false,
+  dbg: { contactsUpsert: 0, contactsUpdate: 0, histContacts: 0, msgPush: 0, chatsUpsert: 0 },
 };
 
 function bumpEpoch() {
   S.epoch += 1;
 }
 
+function isLid(jid) {
+  return typeof jid === "string" && jid.endsWith("@lid");
+}
+
+// Resolve a WhatsApp "linked id" to the real phone JID when we've seen the
+// mapping; otherwise return the jid unchanged.
+function resolveJid(jid) {
+  if (!jid) return jid;
+  if (isLid(jid)) return S.lidToPn.get(jid) || jid;
+  return jid;
+}
+
 function jidToPhone(jid) {
-  const m = /^(\d+)(?:[:.]\d+)?@/.exec(jid || "");
-  return m ? "+" + m[1] : null;
+  const resolved = resolveJid(jid);
+  if (!resolved || isLid(resolved)) return null; // a LID is not a phone number
+  const m = /^(\d+)(?:[:.]\d+)?@/.exec(resolved);
+  return m && resolved.includes("@s.whatsapp.net") ? "+" + m[1] : null;
+}
+
+function rememberLidMappings(pairs) {
+  for (const p of pairs || []) {
+    const lid = p?.lid || p?.lidJid;
+    const pn = p?.pn || p?.jid || p?.phoneNumber;
+    if (lid && pn) S.lidToPn.set(lid, pn);
+  }
 }
 
 // ---- auth state (single-blob equivalent of useMultiFileAuthState) -------
@@ -108,7 +133,8 @@ function serializeAuth() {
 
 // ---- message normalisation --------------------------------------------
 
-function learnContact(jid, { name, notify } = {}) {
+function learnContact(rawJid, { name, notify } = {}) {
+  const jid = resolveJid(rawJid);
   if (!jid || jid === "status@broadcast" || jid.endsWith("@g.us")) return;
   const cur = S.contacts.get(jid) || {};
   const next = {
@@ -127,7 +153,7 @@ function learnContact(jid, { name, notify } = {}) {
 }
 
 function contactName(jid) {
-  const c = S.contacts.get(jid) || {};
+  const c = S.contacts.get(resolveJid(jid)) || {};
   return c.name || c.notify || "";
 }
 
@@ -137,9 +163,11 @@ function senderName(jid, pushName) {
 
 function normalize(m) {
   const key = m.key || {};
-  const jid = key.remoteJid || "";
+  const jid = resolveJid(key.remoteJid || "");
   const fromMe = !!key.fromMe;
-  const senderJid = fromMe ? S.self?.jid || jid : key.participant || jid;
+  const senderJid = fromMe
+    ? S.self?.jid || jid
+    : resolveJid(key.participant || key.participantPn || key.remoteJid || "");
   const ts = Number(m.messageTimestamp?.low ?? m.messageTimestamp ?? 0) || 0;
   const c = m.message || {};
   const unwrapped = c.ephemeralMessage?.message || c.viewOnceMessageV2?.message || c;
@@ -175,8 +203,9 @@ function normalize(m) {
   };
 }
 
-function rememberChat(jid, patch = {}) {
-  if (!jid || jid === "status@broadcast") return;
+function rememberChat(rawJid, patch = {}) {
+  const jid = resolveJid(rawJid);
+  if (!jid || jid === "status@broadcast" || isLid(jid)) return;
   const cur = S.chats.get(jid) || {
     jid,
     name: contactName(jid) || "",
@@ -210,9 +239,13 @@ function pushLive(msg) {
 
 function startSocket() {
   if (!S.auth) loadAuth(null);
+  const blog = log.child({ mod: "baileys" });
   const sock = makeWASocket({
-    auth: S.auth,
-    logger: log.child({ mod: "baileys" }),
+    auth: {
+      creds: S.auth.creds,
+      keys: makeCacheableSignalKeyStore(S.auth.keys, blog),
+    },
+    logger: blog,
     printQRInTerminal: false,
     markOnlineOnConnect: false, // do not broadcast presence
     syncFullHistory: true,
@@ -223,6 +256,7 @@ function startSocket() {
   S.sock = sock;
 
   sock.ev.on("creds.update", () => bumpEpoch());
+  sock.ev.on("lid-mapping.update", (m) => rememberLidMappings([m]));
 
   sock.ev.on("connection.update", async (u) => {
     const { connection, lastDisconnect, qr } = u;
@@ -271,14 +305,20 @@ function startSocket() {
     }
   });
 
-  const learnFromContacts = (cs) =>
-    (cs || []).forEach(
-      (c) => c.id && learnContact(c.id, { name: c.name || c.verifiedName, notify: c.notify }),
-    );
-  sock.ev.on("contacts.upsert", learnFromContacts);
-  sock.ev.on("contacts.update", learnFromContacts);
+  const learnFromContacts = (cs, tag) =>
+    (cs || []).forEach((c) => {
+      if (!c.id) return;
+      if (tag) S.dbg[tag] = (S.dbg[tag] || 0) + 1;
+      learnContact(c.id, {
+        name: c.name || c.verifiedName || c.notify,
+        notify: c.notify,
+      });
+    });
+  sock.ev.on("contacts.upsert", (cs) => learnFromContacts(cs, "contactsUpsert"));
+  sock.ev.on("contacts.update", (cs) => learnFromContacts(cs, "contactsUpdate"));
   sock.ev.on("chats.upsert", (cs) =>
     cs.forEach((c) => {
+      S.dbg.chatsUpsert++;
       if (c.name) learnContact(c.id, { name: c.name });
       rememberChat(c.id, c.name ? { name: c.name } : {});
     }),
@@ -288,14 +328,16 @@ function startSocket() {
   );
 
   const learnFromMessage = (m) => {
-    const jid = m.key?.remoteJid || "";
     if (m.pushName && !m.key?.fromMe) {
-      learnContact(m.key?.participant || jid, { notify: m.pushName });
+      S.dbg.msgPush++;
+      const who = resolveJid(m.key?.participant || m.key?.participantPn || m.key?.remoteJid || "");
+      learnContact(who, { notify: m.pushName });
     }
   };
 
-  sock.ev.on("messaging-history.set", ({ chats, contacts, messages }) => {
-    learnFromContacts(contacts);
+  sock.ev.on("messaging-history.set", ({ chats, contacts, messages, lidPnMappings }) => {
+    rememberLidMappings(lidPnMappings);
+    learnFromContacts(contacts, "histContacts");
     (chats || []).forEach((c) => {
       if (c.name) learnContact(c.id, { name: c.name });
       rememberChat(c.id, c.name ? { name: c.name } : {});
@@ -341,6 +383,21 @@ function statusPayload() {
 }
 
 app.get("/status", (_req, res) => res.json(statusPayload()));
+
+// debug: how much identity info we've learned
+app.get("/debug", (_req, res) => {
+  const chats = [...S.chats.values()];
+  const named = chats.filter((c) => c.name && !/^\+?[\d ]+$/.test(c.name) && !c.name.includes("@"));
+  res.json({
+    chats: chats.length,
+    contacts: S.contacts.size,
+    contacts_with_name: [...S.contacts.values()].filter((c) => c.name).length,
+    contacts_with_notify: [...S.contacts.values()].filter((c) => c.notify).length,
+    named_chats: named.length,
+    sample_contacts: [...S.contacts.entries()].slice(0, 8).map(([k, v]) => ({ jid: k, ...v })),
+    counters: S.dbg,
+  });
+});
 
 app.post("/connect", (req, res) => {
   const blob = req.body?.session ?? null;

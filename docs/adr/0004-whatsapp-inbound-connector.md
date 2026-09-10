@@ -30,6 +30,13 @@ suite**. whatsmeow's lower memory footprint and session robustness are real but
 do not outweigh adding a second language runtime to a single-operator
 deployment. Revisit if session drops become frequent in practice.
 
+**Package/version:** `baileys@7.0.0-rc14` (the actively-maintained unscoped
+package; `@whiskeysockets/baileys@6.7.x` is tagged `legacy`). 6.7.24 threw on
+`SyncdOperation.REMOVE` with no prior op during the initial `regular_low`
+app-state sync, which aborted the sync that carries **contact names** — direct
+chats stayed as phone numbers. 7.x also brings first-class LID↔phone mapping
+(`lidPnMappings` / `lid-mapping.update`), which the sidecar consumes.
+
 A full time-boxed spike against a live account was not run — pairing needs a
 real phone and the comparison above is from the libraries' documentation and
 source. The product contract is unchanged by the choice.
