@@ -14,6 +14,7 @@ from montauk.person_context import (
     build_units,
     dedupe,
     lexical_scores,
+    semantic_scores,
 )
 
 NOW = dt.date(2026, 9, 5)
@@ -292,3 +293,18 @@ class TestNoSemantic:
             now=NOW,
         )
         assert [u.record_id for u in r.facts] == ["fact-1"]
+
+
+class _OneMatchIndex:
+    """A semantic index whose only hit is one fact."""
+
+    def search_person(self, query, person_id, *, limit=25, similarity_threshold=0.0):
+        from montauk.semantic_index import SemanticMatch
+
+        return [SemanticMatch("x", person_id, "fact", "fact-1", "", 0.31)]
+
+
+class TestSemanticScores:
+    def test_a_lone_match_scores_as_the_best_match(self):
+        analysis = analyze_purpose("conservation work", subject_name="Priya")
+        assert semantic_scores("P0001", analysis, _OneMatchIndex()) == {"fact-1": 1.0}  # type: ignore[arg-type]

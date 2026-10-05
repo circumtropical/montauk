@@ -19,11 +19,14 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import TYPE_CHECKING
 
 from .models import Person
 from .schema import CATEGORIES
-from .semantic_index import SemanticIndex
 from .tokens import estimate_tokens
+
+if TYPE_CHECKING:
+    from .semantic_index import SemanticIndex
 
 DETAIL_LEVELS = ("brief", "standard", "comprehensive")
 
@@ -379,8 +382,9 @@ def semantic_scores(
     ordered = sorted(per_record.items(), key=lambda kv: -kv[1])[:top_records]
     hi = ordered[0][1] or 1.0
     lo = ordered[-1][1]
-    span = (hi - lo) or hi
-    return {k: 0.1 + 0.9 * ((v - lo) / span) for k, v in ordered}
+    if hi == lo:  # a lone match (or a tie) is the best match, not the worst
+        return {k: 1.0 for k, _v in ordered}
+    return {k: 0.1 + 0.9 * ((v - lo) / (hi - lo)) for k, v in ordered}
 
 
 # --- ranking -----------------------------------------------------------
@@ -637,7 +641,7 @@ def build_person_context(
     semantic_available = semantic_index is not None and semantic_stale_reason is None
     semantic_note = semantic_stale_reason
     sem: dict[str, float] = {}
-    if semantic_available:
+    if semantic_available and semantic_index is not None:
         try:
             broad = detail_level == "comprehensive" or analysis.is_briefing or analysis.is_advisory
             sem = semantic_scores(
@@ -646,7 +650,7 @@ def build_person_context(
                 semantic_index,
                 similarity_threshold=0.22,
                 top_records=40 if broad else 12,
-            )  # type: ignore[arg-type]
+            )
         except Exception as exc:  # noqa: BLE001 -- provider failure must not fail retrieval
             semantic_available = False
             semantic_note = f"semantic provider unavailable ({type(exc).__name__}); lexical results only"

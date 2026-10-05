@@ -1,18 +1,15 @@
-"""Semantic-index chunking, rebuild, staleness, and privacy.
+"""Semantic-index chunking, lexical fallback, and provider privacy.
 
-The semantic index is not wired into any Phase 2 path yet (briefings and
-the MCP ``prepare_person_context`` tool run lexical-only); these tests
-keep the engine honest for a future revival.
+Index storage, staleness, and search are PostgreSQL-backed and tested in
+tests/phase2/test_semantic.py.
 """
 
 import datetime as dt
 
-import pytest
-
 from montauk.embeddings.local import LocalEmbeddingProvider
 from montauk.models import Fact, Interaction, Person
 from montauk.person_context import build_person_context
-from montauk.semantic_index import SCHEMA_VERSION, SemanticIndex, chunk_person
+from montauk.semantic_index import chunk_person
 
 LONG_SUMMARY = (
     "We met for the first date at the waterfront. We walked most of the pier and talked about "
@@ -22,11 +19,6 @@ LONG_SUMMARY = (
     "relationship, which was a little pointed but fair. Overall it felt easy and low pressure "
     "even if I was not sure about the spark yet."
 )
-
-
-@pytest.fixture(scope="module")
-def provider() -> LocalEmbeddingProvider:
-    return LocalEmbeddingProvider()
 
 
 def _person(**kw) -> Person:
@@ -78,31 +70,6 @@ class TestChunking:
         assert len(chunk_person(person)) == 6  # summary + 5 facts, not 1
 
 
-class TestRebuildAndStaleness:
-    def test_rebuild_is_idempotent(self, tmp_path, provider):
-        people = {"P0001": _person(facts=[Fact(id="fact-1", category="Interests", text="Climbs.")])}
-        idx = SemanticIndex(tmp_path / "vectors", provider)
-        idx.rebuild(people)
-        first = sorted(r["chunk_id"] for r in idx._conn.execute("SELECT chunk_id FROM chunks"))
-        idx.rebuild(people)
-        second = sorted(r["chunk_id"] for r in idx._conn.execute("SELECT chunk_id FROM chunks"))
-        assert first == second
-        assert idx.get_meta("schema_version") == SCHEMA_VERSION
-
-    def test_chunking_config_change_marks_index_stale(self, tmp_path, provider):
-        people = {"P0001": _person(interactions=[Interaction(id="int-1", date="2026", summary=LONG_SUMMARY)])}
-        vdir = tmp_path / "vectors"
-        SemanticIndex(vdir, provider, interaction_chunk_tokens=120).rebuild(people)
-        reopened = SemanticIndex(vdir, provider, interaction_chunk_tokens=40)
-        assert reopened.stale_reason() is not None
-        assert "chunk" in reopened.stale_reason()
-
-    def test_content_hashes_are_recorded_for_drift_detection(self, tmp_path, provider):
-        idx = SemanticIndex(tmp_path / "vectors", provider)
-        idx.rebuild({"P0001": _person()}, content_hashes={"P0001": "abc123"})
-        assert idx.person_content_hash("P0001") == "abc123"
-
-
 class TestLexicalFallback:
     def test_build_person_context_works_with_no_index(self):
         person = _person(facts=[Fact(id="fact-1", category="Interests", text="Climbs at the gym.")])
@@ -123,15 +90,3 @@ class TestLexicalFallback:
 class TestPrivacy:
     def test_default_embedding_provider_is_local_only(self):
         assert LocalEmbeddingProvider.provider == "local"
-
-    def test_index_state_carries_no_personal_content(self, tmp_path, provider):
-        secret = "Priya confided something very private about her family."
-        idx = SemanticIndex(tmp_path / "vectors", provider)
-        idx.rebuild(
-            {
-                "P0001": _person(
-                    summary=secret, facts=[Fact(id="fact-1", category="General Notes", text=secret)]
-                )
-            }
-        )
-        assert secret not in repr(idx.index_state(active_person_ids={"P0001"}))

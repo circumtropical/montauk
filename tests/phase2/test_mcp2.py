@@ -326,3 +326,64 @@ class TestConnectorHealth:
         health = out["connectors"][0]
         assert health["status"] == "connected" and health["connected_as"] == "+15550001111"
         assert "secret" not in str(out) and "encrypted_session" not in str(out)
+
+
+class _BrokenEmbeddings:
+    model_name = "broken"
+    dimension = 384
+
+    def embed(self, texts):
+        raise RuntimeError("model unavailable")
+
+
+@pytest.fixture
+def broken_semantic_url(session_maker, secret_box):
+    ctx = Mcp2Context(
+        session_factory=session_maker, secret_box=secret_box, embedding_provider=_BrokenEmbeddings()
+    )
+    with _serve(build_mcp2_app(ctx)) as url:
+        yield url
+
+
+class TestSemanticSearch:
+    async def test_vague_description_finds_a_person_by_their_facts(self, db_session, workspace, mcp_url):
+        _person(db_session, workspace)
+        _person(
+            db_session,
+            workspace,
+            id="P0002",
+            name="Mike Chen",
+            summary="Met at an MIT alumni mixer last spring.",
+            company=None,
+            birthday=None,
+            facts=[Fact(id="fact-1", category="Work & Education", text="Builds warehouse robots.")],
+            interactions=[],
+        )
+        token = _token(db_session, workspace)
+        db_session.commit()
+        async with _client(mcp_url, token) as s:
+            found = await _call(s, "search_people", query="the robotics guy from the MIT mixer")
+        top = found["candidates"][0]
+        assert top["person_id"] == "P0002"
+        assert any(e.startswith("semantic match") for e in top["match_evidence"])
+
+    async def test_prepare_person_context_reports_semantic(self, db_session, workspace, mcp_url):
+        _person(db_session, workspace)
+        token = _token(db_session, workspace)
+        db_session.commit()
+        async with _client(mcp_url, token) as s:
+            out = await _call(s, "prepare_person_context", person_id="P0001", purpose="conservation work")
+        assert out["retrieval"]["semantic_available"] is True
+        # no shared words with "Runs land-protection projects..." -- found by meaning
+        assert out["facts"][0]["id"] == "fact-1"
+
+    async def test_provider_failure_degrades_to_lexical(self, db_session, workspace, broken_semantic_url):
+        _person(db_session, workspace)
+        token = _token(db_session, workspace)
+        db_session.commit()
+        async with _client(broken_semantic_url, token) as s:
+            found = await _call(s, "search_people", query="Dwelley")
+            out = await _call(s, "prepare_person_context", person_id="P0001", purpose="sailing")
+        assert found["candidates"][0]["person_id"] == "P0001"
+        assert out["retrieval"]["semantic_available"] is False
+        assert "unavailable" in out["retrieval"]["note"]

@@ -10,6 +10,7 @@ revisions and resolves relationship references.
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
@@ -61,6 +62,10 @@ from .context import Mcp2Context
 
 READ = "memory_read"
 WRITE = "memory_write"
+# search_people: semantic evidence lines kept per candidate
+_MAX_SEMANTIC_EVIDENCE = 2
+
+logger = logging.getLogger(__name__)
 
 
 def _person_core(person: Person) -> PersonCore:
@@ -289,6 +294,7 @@ def register_mcp2_tools(server: MCPServer, ctx: Mcp2Context) -> None:
             raise MontaukValidationError(f"mode must be one of {briefing.MODES}")
         async with _scope(ctx, mcp_ctx, capability=READ) as (session, scope):
             _require(PeopleRepository(scope), person_id, include_archived=True)
+            index, semantic_note = ctx.semantic_index(scope)
             result = await briefing.prepare_briefing(
                 session,
                 scope,
@@ -298,6 +304,8 @@ def register_mcp2_tools(server: MCPServer, ctx: Mcp2Context) -> None:
                 mode=mode,
                 max_tokens=max_tokens,
                 secret_box=ctx.secret_box,
+                semantic_index=index,
+                semantic_note=semantic_note,
                 retrieval=ctx.retrieval,
             )
             return result.agent_payload()
@@ -339,12 +347,14 @@ def register_mcp2_tools(server: MCPServer, ctx: Mcp2Context) -> None:
             raise MontaukValidationError(f"max_tokens must be within [{rcfg.min_tokens}, {rcfg.max_tokens}]")
         async with _scope(ctx, mcp_ctx, capability=READ) as (_session, scope):
             row = _require(PeopleRepository(scope), person_id, include_archived=True)
+            index, semantic_note = ctx.semantic_index(scope)
             result = build_person_context(
                 mapping.person_to_domain(row),
                 purpose,
                 detail_level=detail_level,
                 budget_tokens=budget,
-                semantic_index=None,
+                semantic_index=index,
+                semantic_stale_reason=semantic_note,
                 lexical_enabled=rcfg.lexical_enabled,
             )
             return PersonContextResponse.model_validate(result.to_payload())
@@ -355,25 +365,51 @@ def register_mcp2_tools(server: MCPServer, ctx: Mcp2Context) -> None:
 
     @server.tool(
         description=(
-            "Find people by name, alias, company, location, or contact detail. Returns candidates "
-            "with their person_id -- resolve identity with this before any other tool. If several "
+            "Find people by name, alias, company, location, contact detail, or a remembered "
+            "detail -- including vague descriptions, not just names (e.g. 'the robotics guy I met "
+            "at an MIT mixer'). Returns candidates with their person_id and `match_evidence` "
+            "explaining each match -- resolve identity with this before any other tool. If several "
             "plausible people come back, ask the user rather than guessing."
         )
     )
     async def search_people(query: str, mcp_ctx: Context) -> SearchResult:
         async with _scope(ctx, mcp_ctx, capability=READ) as (_session, scope):
-            rows = PeopleRepository(scope).list_people(query=query, archived=False, limit=ctx.max_candidates)
-            return SearchResult(
-                candidates=[
-                    PersonCandidate(
-                        person_id=r.public_id,
-                        name=r.name,
-                        summary=r.summary,
-                        match_evidence=[a.alias for a in r.aliases] or [],
+            repo = PeopleRepository(scope)
+            candidates: dict[str, PersonCandidate] = {
+                r.public_id: PersonCandidate(
+                    person_id=r.public_id,
+                    name=r.name,
+                    summary=r.summary,
+                    match_evidence=[a.alias for a in r.aliases] or [],
+                )
+                for r in repo.list_people(query=query, archived=False, limit=ctx.max_candidates)
+            }
+            index, _note = ctx.semantic_index(scope)
+            matches = []
+            if index is not None:
+                try:
+                    # chunk-level hits: over-fetch so several people can surface
+                    matches = index.search(
+                        query, limit=ctx.max_candidates * 3, similarity_threshold=ctx.similarity_threshold
                     )
-                    for r in rows
-                ]
-            )
+                except Exception:  # noqa: BLE001 -- semantic is an enhancement; lexical still answers
+                    logger.warning("semantic search failed; lexical candidates only", exc_info=True)
+            semantic_lines: dict[str, int] = {}
+            for match in matches:
+                if semantic_lines.get(match.person_id, 0) >= _MAX_SEMANTIC_EVIDENCE:
+                    continue
+                snippet = match.text if len(match.text) <= 140 else f"{match.text[:137]}..."
+                line = f"semantic match ({match.chunk_type}, score {match.score:.2f}): {snippet!r}"
+                if match.person_id not in candidates:
+                    row = repo.get(match.person_id, include_archived=False)
+                    if row is None:
+                        continue
+                    candidates[match.person_id] = PersonCandidate(
+                        person_id=row.public_id, name=row.name, summary=row.summary, match_evidence=[]
+                    )
+                candidates[match.person_id].match_evidence.append(line)
+                semantic_lines[match.person_id] = semantic_lines.get(match.person_id, 0) + 1
+            return SearchResult(candidates=list(candidates.values())[: ctx.max_candidates])
 
     @server.tool(
         description="Return the structured fields for a known person_id (name, aliases, birthday, "

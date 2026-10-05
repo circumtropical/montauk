@@ -39,6 +39,9 @@ durable `processing_jobs` arrive with extraction.
 
 ## 6. pgvector vs. retained local vector index
 
+> **Superseded by [ADR 0005](0005-semantic-vectors-in-postgres.md)** (2026-10-05): vectors
+> now live in plain PostgreSQL tables, because the dashboard and the MCP server both write.
+
 **Decision: retain the Phase 1 rebuildable local vector index
 (`semantic_index.py`), rebuilt from PostgreSQL instead of from Markdown.**
 

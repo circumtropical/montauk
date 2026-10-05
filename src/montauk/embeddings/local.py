@@ -7,6 +7,9 @@ for pre-baking that into the image for fully offline deployments).
 
 from __future__ import annotations
 
+import threading
+import time
+
 from fastembed import TextEmbedding
 
 DEFAULT_MODEL_NAME = "sentence-transformers/all-MiniLM-L6-v2"
@@ -39,3 +42,35 @@ class LocalEmbeddingProvider:
         if not texts:
             return []
         return [vector.astype("float32").tolist() for vector in self._model.embed(texts)]
+
+
+# A server process shares one provider: loading the ONNX model costs ~1s
+# and ~100 MB, and the first load may download the weights. A failed load
+# is not retried for _RETRY_AFTER_SECONDS so a missing model (no network,
+# unwritable cache) costs each request an immediate lexical fallback, not
+# a fresh download timeout.
+_RETRY_AFTER_SECONDS = 300.0
+_default: LocalEmbeddingProvider | None = None
+_last_failure: tuple[float, str] | None = None
+_lock = threading.Lock()
+
+
+class EmbeddingProviderUnavailable(RuntimeError):
+    pass
+
+
+def default_provider() -> LocalEmbeddingProvider:
+    """The process-wide local provider, loaded on first use."""
+    global _default, _last_failure
+    with _lock:
+        if _default is not None:
+            return _default
+        if _last_failure is not None and time.monotonic() - _last_failure[0] < _RETRY_AFTER_SECONDS:
+            raise EmbeddingProviderUnavailable(_last_failure[1])
+        try:
+            _default = LocalEmbeddingProvider()
+        except Exception as exc:
+            _last_failure = (time.monotonic(), f"{type(exc).__name__}: {exc}")
+            raise EmbeddingProviderUnavailable(_last_failure[1]) from exc
+        _last_failure = None
+        return _default

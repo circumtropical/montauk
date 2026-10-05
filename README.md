@@ -11,7 +11,7 @@ are the design record.
 > Montauk began as a Markdown-file store with a stdio MCP server (`montauk_phase1_build_spec.md`).
 > That store and its server were removed once the PostgreSQL store, the migrator that imported
 > it, and this MCP surface were all live. The retrieval engine (`person_context.py`) and the
-> local semantic index (`semantic_index.py`, currently unused) carried over.
+> local semantic index (`semantic_index.py`, now PostgreSQL-backed -- ADR 0005) carried over.
 
 **Identity vs. name.** Each person has a permanent, generic ID (`P0001`, `P0002`, ...) that
 Montauk assigns and never changes or reuses. The person's `name` is just the best label
@@ -25,7 +25,9 @@ plus lightweight `source_refs`. The agent drills into individual records with
 `get_context_sources` / `get_facts` / `get_interactions` only to verify a claim or get detail
 the briefing left out. A narrow factual question ("what is X's birthday?") is answered from
 the structured field with no model call. `prepare_person_context` is the deterministic,
-no-LLM path -- ranked raw records, hybrid BM25 + (optional) semantic retrieval, no synthesis.
+no-LLM path -- ranked raw records, hybrid BM25 + semantic retrieval, no synthesis.
+`search_people` matches names, aliases and contact details, and also vague descriptions
+("the robotics guy from the MIT mixer") by semantic similarity over facts and interactions.
 Montauk never generates advice, quotations, or missing facts; that is the agent's job.
 
 ## Running it
@@ -43,6 +45,11 @@ uv run montauk mcp             # http://127.0.0.1:8766/mcp  (agent endpoint)
 - `MONTAUK_MASTER_KEY` (32 bytes, base64) encrypts stored model-provider API keys. Without it,
   briefings fall back to the deterministic evidence packet.
 - Both servers refuse to start against a stale schema; run `montauk db upgrade` after a pull.
+- Semantic search uses a local embedding model (fastembed, all-MiniLM-L6-v2, ~90 MB), downloaded
+  from Hugging Face on first use. Set `FASTEMBED_CACHE_PATH` to a persistent, writable directory
+  (the default is under `/tmp`). The index maintains itself on read; `montauk semantic status`
+  reports coverage and `montauk semantic rebuild` warms it after a deploy. If the model can't
+  load, retrieval falls back to lexical and reports `semantic_available: false`.
 - Put a TLS-terminating reverse proxy in front for anything beyond loopback. One hostname can
   serve both: route `/mcp*` to the MCP port, everything else to the dashboard
   (`docs/deploy-phase2-shared-host.md`).

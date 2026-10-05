@@ -27,6 +27,7 @@ from sqlalchemy import (
     ForeignKey,
     Index,
     Integer,
+    LargeBinary,
     Numeric,
     String,
     Text,
@@ -534,6 +535,56 @@ class SummaryCacheEntry(Base):
     memory_fingerprint: Mapped[str] = mapped_column(String(64))
     created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     invalidated_at: Mapped[dt.datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+SEMANTIC_CHUNK_TYPES = ("summary", "fact", "interaction")
+
+
+class SemanticChunk(Base):
+    """One embedded semantic unit of a person's curated memory (spec 19):
+    the summary, a fact, or (a window of) an interaction summary. Derived
+    data -- rebuildable from the canonical tables at any time (ADR 0005)."""
+
+    __tablename__ = "semantic_chunks"
+    __table_args__ = (
+        UniqueConstraint("person_id", "chunk_id"),
+        Index("ix_semantic_chunks_workspace_person", "workspace_id", "person_id"),
+        CheckConstraint("chunk_type IN " + str(SEMANTIC_CHUNK_TYPES), name="chunk_type_valid"),
+    )
+
+    id: Mapped[uuid.UUID] = uuid_pk()
+    workspace_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("workspaces.id", ondelete="CASCADE"))
+    person_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("people.id", ondelete="CASCADE"))
+    chunk_id: Mapped[str] = mapped_column(String(64))
+    chunk_type: Mapped[str] = mapped_column(String(16))
+    local_id: Mapped[str | None] = mapped_column(String(32))
+    chunk_index: Mapped[int] = mapped_column(Integer, default=0)
+    chunk_total: Mapped[int] = mapped_column(Integer, default=1)
+    text: Mapped[str] = mapped_column(Text)
+    # float32 little-endian vector (numpy ``tobytes``); `dimension` floats.
+    embedding: Mapped[bytes] = mapped_column(LargeBinary)
+
+
+class SemanticPersonState(Base):
+    """What a person's semantic chunks were built from. `content_hash` covers
+    the chunk texts plus the embedding model and chunking configuration, so
+    a mismatch on read -- from an edit in any process, or a model/config
+    change -- means the person must be re-embedded."""
+
+    __tablename__ = "semantic_person_state"
+
+    person_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("people.id", ondelete="CASCADE"), primary_key=True
+    )
+    workspace_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="CASCADE"), index=True
+    )
+    content_hash: Mapped[str] = mapped_column(String(64))
+    model_name: Mapped[str] = mapped_column(String(120))
+    dimension: Mapped[int] = mapped_column(Integer)
+    chunk_fingerprint: Mapped[str] = mapped_column(String(64))
+    chunk_count: Mapped[int] = mapped_column(Integer, default=0)
+    indexed_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
 
 
 class LegacyMigrationRun(Base):

@@ -48,6 +48,7 @@ from ..llm.base import LLMBudgetExceeded, LLMError, LLMNotConfigured
 from ..llm.factory import build_provider
 from ..models import Person as DomainPerson
 from ..person_context import analyze_purpose, build_person_context
+from ..semantic_index import SemanticIndex
 from . import llm_usage, model_config
 from .summaries import cache_key, memory_fingerprint
 
@@ -55,7 +56,8 @@ from .summaries import cache_key, memory_fingerprint
 # changes: a cached briefing built by an older version is not served (it would
 # reflect the old logic even though the person's record has not changed).
 #   v1 -> v2: broad/advisory purposes now retrieve the whole record.
-PROMPT_VERSION = "briefing.v2"
+#   v2 -> v3: evidence ranking adds semantic similarity.
+PROMPT_VERSION = "briefing.v3"
 MODES = ("summary_only", "evidence_only", "summary_with_evidence")
 COVERAGE_LEVELS = ("brief", "standard", "comprehensive")
 
@@ -222,12 +224,18 @@ def _core_fields(p: DomainPerson) -> dict[str, Any]:
 
 
 def _select_evidence(
-    domain: DomainPerson, purpose: str, coverage: str, rcfg: RetrievalConfig
+    domain: DomainPerson,
+    purpose: str,
+    coverage: str,
+    rcfg: RetrievalConfig,
+    semantic_index: SemanticIndex | None = None,
+    semantic_note: str | None = None,
 ) -> tuple[dict[str, Any], list[str]]:
     """Select the curated evidence for `purpose` (spec 24.1).
 
-    There is no semantic index for the Postgres store yet, so retrieval is
-    lexical (BM25) only. A broad ask -- a briefing, an advisory question
+    Ranking is hybrid: lexical (BM25) plus, when `semantic_index` is
+    given, vector similarity -- which is what lets a pointed question
+    find a record worded differently. A broad ask -- a briefing, an advisory question
     ("what should I discuss with X"), a present-state question, or anything
     without a pointed lexical query -- gets the *whole* curated record: a
     person's record is small, and narrowing it to the handful of lexical
@@ -248,7 +256,8 @@ def _select_evidence(
         purpose,
         detail_level=retrieval_level,
         budget_tokens=rcfg.budget_for(retrieval_level),
-        semantic_index=None,
+        semantic_index=semantic_index,
+        semantic_stale_reason=semantic_note,
         lexical_enabled=rcfg.lexical_enabled,
     )
     payload = ctx.to_payload()
@@ -258,7 +267,8 @@ def _select_evidence(
             purpose,
             detail_level="comprehensive",
             budget_tokens=rcfg.budget_for("comprehensive"),
-            semantic_index=None,
+            semantic_index=semantic_index,
+            semantic_stale_reason=semantic_note,
             lexical_enabled=rcfg.lexical_enabled,
         )
         payload = ctx.to_payload()
@@ -353,6 +363,8 @@ async def prepare_briefing(
     secret_box: SecretBox | None,
     force: bool = False,
     retrieval: RetrievalConfig | None = None,
+    semantic_index: SemanticIndex | None = None,
+    semantic_note: str | None = None,
 ) -> BriefingResult:
     if not purpose.strip():
         raise ValueError("purpose must not be blank")
@@ -385,7 +397,7 @@ async def prepare_briefing(
                 note=None if value is not None else f"{field_name} is not recorded for this person",
             )
 
-    evidence, refs = _select_evidence(domain, purpose, detail_level, rcfg)
+    evidence, refs = _select_evidence(domain, purpose, detail_level, rcfg, semantic_index, semantic_note)
     evidence_text = _render_evidence(evidence)
     fingerprint = memory_fingerprint(row)
 

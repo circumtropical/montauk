@@ -30,7 +30,7 @@ Delete the Phase 1 stack:
   `prepare_person_context`) and `semantic_index.py` + `embeddings/` (the local
   vector index). Semantic search is not wired into any Phase 2 path yet
   (retrieval is BM25-only); the code stays as the starting point for a future
-  pgvector-backed revival. `person_to_markdown` moved into `exporters/markdown.py`
+  pgvector-backed revival (wired back in, PostgreSQL-backed: ADR 0005). `person_to_markdown` moved into `exporters/markdown.py`
   as a self-contained serializer for `get_full_record` and the briefing-cache
   fingerprint.
 - The `legacy_migration_runs` table and its read-only dashboard display stay: it

@@ -145,7 +145,72 @@ def mcp(
     uvicorn.run(build_mcp2_app(ctx, host=host), host=host, port=port)
 
 
+semantic_app = typer.Typer(
+    add_completion=False, no_args_is_help=True, help="Semantic (vector) search index maintenance."
+)
+WorkspaceOption = typer.Option(None, "--workspace", help="Workspace slug (default: every workspace).")
+
+
+def _semantic_run(database_url: str | None, workspace: str | None, *, rebuild: bool) -> None:
+    from sqlalchemy import select
+
+    from .config import RetrievalConfig
+    from .db import models as orm
+    from .db.repositories import Actor, WorkspaceScope
+    from .db.schema_ops import is_up_to_date
+    from .embeddings.local import default_provider
+    from .semantic_index import SemanticIndex
+
+    url = _require_url(database_url)
+    if not is_up_to_date(url):
+        typer.echo("error: schema is not up to date; run `montauk db upgrade` first", err=True)
+        raise typer.Exit(code=1)
+    rcfg = RetrievalConfig()
+    provider = default_provider()
+    with session_factory(create_db_engine(url))() as session:
+        stmt = select(orm.Workspace).order_by(orm.Workspace.slug)
+        if workspace is not None:
+            stmt = stmt.where(orm.Workspace.slug == workspace)
+        workspaces = list(session.execute(stmt).scalars())
+        if not workspaces:
+            typer.echo(f"error: no workspace {workspace!r}" if workspace else "no workspaces", err=True)
+            raise typer.Exit(code=1)
+        for ws in workspaces:
+            index = SemanticIndex(
+                WorkspaceScope(session, ws.id, Actor.system()),
+                provider,
+                interaction_chunk_tokens=rcfg.interaction_chunk_tokens,
+                interaction_chunk_overlap_tokens=rcfg.interaction_chunk_overlap_tokens,
+            )
+            if rebuild:
+                n = index.rebuild()
+                session.commit()
+                typer.echo(f"{ws.slug}: re-embedded {n} people")
+            st = index.status()
+            stale = ", ".join(st["stale_person_ids"]) or "none"
+            typer.echo(
+                f"{ws.slug}: {st['indexed_people']}/{st['active_people']} people indexed, "
+                f"{st['chunks']} chunks, model {st['model_name']} ({st['dimension']}d), "
+                f"{st['chunk_fingerprint']}; stale: {stale}"
+            )
+
+
+@semantic_app.command("status")
+def semantic_status(database_url: str | None = DbUrlOption, workspace: str | None = WorkspaceOption) -> None:
+    """Report index coverage per workspace. People listed as stale are
+    re-embedded automatically on their next search."""
+    _semantic_run(database_url, workspace, rebuild=False)
+
+
+@semantic_app.command("rebuild")
+def semantic_rebuild(database_url: str | None = DbUrlOption, workspace: str | None = WorkspaceOption) -> None:
+    """Drop and re-embed the index (e.g. to warm it after a deploy). Never
+    needed for correctness -- searches reconcile stale people themselves."""
+    _semantic_run(database_url, workspace, rebuild=True)
+
+
 def register(app: typer.Typer) -> None:
     app.add_typer(db_app, name="db")
+    app.add_typer(semantic_app, name="semantic")
     app.command("dashboard")(dashboard)
     app.command("mcp")(mcp)

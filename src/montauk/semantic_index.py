@@ -6,65 +6,50 @@ deterministic structured fields like birthdays or phone numbers. A long
 interaction summary is split at sentence boundaries into overlapping
 chunks (each still pointing at the one canonical interaction_id).
 
-Vector storage is brute-force cosine similarity over an in-memory numpy
-matrix persisted to vectors.npy, with parallel chunk metadata in a
-separate chunks.sqlite. This is appropriate at the expected
-personal-relationship-memory scale (hundreds to low thousands of chunks).
+Vectors live in PostgreSQL (``semantic_chunks``, a plain float32 ``bytea``
+column -- no pgvector) next to the canonical records, so the dashboard and
+the MCP server -- both of which write people -- share one index
+(ADR 0005). Similarity is brute-force cosine over a numpy matrix loaded
+per query, which is appropriate at personal-relationship-memory scale
+(hundreds to low thousands of chunks).
 
-The index is derived: deleting it and rebuilding from canonical Markdown
-must produce an equivalent index. `person_meta.content_hash` lets a
-reader tell whether a person's chunks are current with their canonical
-file; `vector_meta` records the schema version, embedding model, and
-chunking configuration so drift can be detected at startup.
+The index reconciles on read: before a search, each person in scope is
+re-chunked and hashed (chunk texts + embedding model + chunking config);
+a hash that differs from ``semantic_person_state`` -- an edit from either
+process, a model change, a chunking change -- re-embeds just that person.
+Deleting both tables and searching again rebuilds an equivalent index.
 """
 
 from __future__ import annotations
 
+import hashlib
 import logging
-import sqlite3
-from collections.abc import Mapping
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
-from pathlib import Path
-from typing import Self
+from typing import Any
 
 import numpy as np
+from sqlalchemy import delete, func, insert, select, text
 
+from .db import mapping
+from .db import models as orm
+from .db.repositories import PeopleRepository, WorkspaceScope
 from .embeddings.base import EmbeddingProvider
 from .models import Person
 from .tokens import estimate_tokens, split_sentences
 
 logger = logging.getLogger(__name__)
 
-# Bump when the chunks table shape or chunk-id scheme changes so startup
-# validation forces a rebuild.
-SCHEMA_VERSION = "2"
+# Bump when the chunk-id scheme or chunk contents change so every person's
+# content hash changes and is re-embedded on next read.
+SCHEMA_VERSION = "3"
 
 DEFAULT_INTERACTION_CHUNK_TOKENS = 120
 DEFAULT_INTERACTION_CHUNK_OVERLAP_TOKENS = 24
 
-CHUNKS_SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS chunks (
-  row_index    INTEGER PRIMARY KEY,
-  chunk_id     TEXT UNIQUE NOT NULL,
-  person_id    TEXT NOT NULL,
-  chunk_type   TEXT NOT NULL CHECK (chunk_type IN ('summary','fact','interaction')),
-  local_id     TEXT,
-  chunk_index  INTEGER NOT NULL DEFAULT 0,
-  chunk_total  INTEGER NOT NULL DEFAULT 1,
-  text         TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_chunks_person ON chunks(person_id);
-
-CREATE TABLE IF NOT EXISTS person_meta (
-  person_id    TEXT PRIMARY KEY,
-  content_hash TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS vector_meta (
-  key   TEXT PRIMARY KEY,
-  value TEXT NOT NULL
-);
-"""
+# First key of the two-int advisory lock serializing index writes per
+# workspace (second key: hashtext(workspace_id)). Arbitrary, but fixed.
+_LOCK_NAMESPACE = 0x5E3A
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,64 +179,44 @@ def _cosine_similarity(query_vector: np.ndarray, matrix: np.ndarray) -> np.ndarr
     return matrix_norms @ query_norm
 
 
-_CHUNK_COLUMNS = (
-    "row_index",
-    "chunk_id",
-    "person_id",
-    "chunk_type",
-    "local_id",
-    "chunk_index",
-    "chunk_total",
-    "text",
+_MATCH_COLUMNS = (
+    orm.SemanticChunk.chunk_id,
+    orm.SemanticChunk.chunk_type,
+    orm.SemanticChunk.local_id,
+    orm.SemanticChunk.chunk_index,
+    orm.SemanticChunk.chunk_total,
+    orm.SemanticChunk.text,
+    orm.SemanticChunk.embedding,
+    orm.Person.public_id,
 )
 
 
 class SemanticIndex:
+    """One workspace's view of the semantic index, bound to a request's
+    session. Writes (re-embedding stale people) happen inside a savepoint
+    under a per-workspace advisory lock and become durable when the
+    caller's transaction commits."""
+
     def __init__(
         self,
-        index_dir: Path | str,
+        scope: WorkspaceScope,
         embedding_provider: EmbeddingProvider,
         *,
         interaction_chunk_tokens: int = DEFAULT_INTERACTION_CHUNK_TOKENS,
         interaction_chunk_overlap_tokens: int = DEFAULT_INTERACTION_CHUNK_OVERLAP_TOKENS,
     ):
-        self.index_dir = Path(index_dir)
-        self.index_dir.mkdir(parents=True, exist_ok=True)
-        self.vectors_path = self.index_dir / "vectors.npy"
-        self.chunks_db_path = self.index_dir / "chunks.sqlite"
+        self.scope = scope
+        self.session = scope.session
+        self.workspace_id = scope.workspace_id
         self.embedding_provider = embedding_provider
         self.interaction_chunk_tokens = interaction_chunk_tokens
         self.interaction_chunk_overlap_tokens = interaction_chunk_overlap_tokens
 
-        self._conn = sqlite3.connect(self.chunks_db_path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._migrate_physical_schema()
-        self._conn.executescript(CHUNKS_SCHEMA_SQL)
-        self._conn.commit()
-        self._vectors = self._load_vectors()
+    # -- fingerprints -----------------------------------------------------
 
-    def _migrate_physical_schema(self) -> None:
-        """A pre-v2 chunks table lacks chunk_index/chunk_total and the
-        person_meta table. The index is derived, so the safe migration is
-        to drop the stale physical tables and let startup reconciliation
-        repopulate them from canonical Markdown."""
-        existing = {r[0] for r in self._conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        if "chunks" not in existing:
-            return
-        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(chunks)")}
-        if {"chunk_index", "chunk_total"} <= cols and "person_meta" in existing:
-            return
-        logger.warning(
-            "semantic index chunks.sqlite is a pre-v%s schema; dropping for rebuild", SCHEMA_VERSION
-        )
-        self._conn.execute("DROP TABLE IF EXISTS chunks")
-        self._conn.execute("DROP TABLE IF EXISTS person_meta")
-        self._conn.execute("DELETE FROM vector_meta")
-        self._conn.commit()
-        if self.vectors_path.exists():
-            self.vectors_path.unlink()
-
-    # -- chunk config fingerprint -------------------------------------------
+    @property
+    def model_name(self) -> str:
+        return str(getattr(self.embedding_provider, "model_name", "unknown"))
 
     def chunk_fingerprint(self) -> str:
         return f"iact:{self.interaction_chunk_tokens}/{self.interaction_chunk_overlap_tokens}"
@@ -263,216 +228,191 @@ class SemanticIndex:
             interaction_chunk_overlap_tokens=self.interaction_chunk_overlap_tokens,
         )
 
-    def _load_vectors(self) -> np.ndarray:
-        if self.vectors_path.exists():
-            vectors = np.load(self.vectors_path)
-            if vectors.ndim == 2 and vectors.shape[1] == self.embedding_provider.dimension:
-                return vectors
-            logger.warning(
-                "vectors.npy dimension %s doesn't match provider dimension %s; starting empty until rebuild",
-                vectors.shape[1:] if vectors.ndim == 2 else vectors.shape,
-                self.embedding_provider.dimension,
-            )
-        return np.zeros((0, self.embedding_provider.dimension), dtype="float32")
-
-    def close(self) -> None:
-        self._conn.close()
-
-    def __enter__(self) -> Self:
-        return self
-
-    def __exit__(self, *exc_info: object) -> None:
-        self.close()
-
-    def _save(self) -> None:
-        np.save(self.vectors_path, self._vectors)
-
-    def _set_meta(self, key: str, value: str) -> None:
-        self._conn.execute(
-            "INSERT INTO vector_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (key, value),
-        )
-
-    def get_meta(self, key: str) -> str | None:
-        row = self._conn.execute("SELECT value FROM vector_meta WHERE key = ?", (key,)).fetchone()
-        return row["value"] if row else None
-
-    def _write_fingerprint_meta(self) -> None:
-        self._set_meta("schema_version", SCHEMA_VERSION)
-        self._set_meta("model_name", getattr(self.embedding_provider, "model_name", "unknown"))
-        self._set_meta("dimension", str(self.embedding_provider.dimension))
-        self._set_meta("chunk_fingerprint", self.chunk_fingerprint())
-
-    def chunk_count(self) -> int:
-        return self._conn.execute("SELECT COUNT(*) AS n FROM chunks").fetchone()["n"]
-
-    def person_count(self) -> int:
-        return self._conn.execute("SELECT COUNT(*) AS n FROM person_meta").fetchone()["n"]
-
-    def person_content_hash(self, person_id: str) -> str | None:
-        row = self._conn.execute(
-            "SELECT content_hash FROM person_meta WHERE person_id = ?", (person_id,)
-        ).fetchone()
-        return row["content_hash"] if row else None
-
-    # -- drift detection --------------------------------------------------
-
-    def stale_reason(self) -> str | None:
-        """Why the whole index is unusable as *semantic* results, or None
-        if its fingerprint matches the current provider/schema/chunking."""
-        if self.get_meta("schema_version") not in (None, SCHEMA_VERSION):
-            return f"schema version changed ({self.get_meta('schema_version')} -> {SCHEMA_VERSION})"
-        stored_model = self.get_meta("model_name")
-        current_model = getattr(self.embedding_provider, "model_name", "unknown")
-        if stored_model is not None and stored_model != current_model:
-            return f"embedding model changed ({stored_model} -> {current_model})"
-        stored_dim = self.get_meta("dimension")
-        if stored_dim is not None and stored_dim != str(self.embedding_provider.dimension):
-            return f"embedding dimension changed ({stored_dim} -> {self.embedding_provider.dimension})"
-        stored_fp = self.get_meta("chunk_fingerprint")
-        if stored_fp is not None and stored_fp != self.chunk_fingerprint():
-            return f"chunking configuration changed ({stored_fp} -> {self.chunk_fingerprint()})"
-        if self._vectors.shape[1:] and self._vectors.shape[1] != self.embedding_provider.dimension:
-            return "vector matrix dimension does not match the provider"
-        if len(self._vectors) != self.chunk_count():
-            return "vector matrix and chunk table are out of sync"
-        return None
-
-    def orphan_person_ids(self, active_person_ids: set[str]) -> set[str]:
-        indexed = {r["person_id"] for r in self._conn.execute("SELECT DISTINCT person_id FROM chunks")}
-        indexed |= {r["person_id"] for r in self._conn.execute("SELECT person_id FROM person_meta")}
-        return indexed - active_person_ids
-
-    def index_state(self, *, active_person_ids: set[str] | None = None) -> dict:
-        state = {
-            "schema_version": self.get_meta("schema_version"),
-            "model_name": self.get_meta("model_name"),
-            "dimension": self.get_meta("dimension"),
-            "chunk_fingerprint": self.get_meta("chunk_fingerprint"),
-            "chunk_count": self.chunk_count(),
-            "person_count": self.person_count(),
-            "vector_rows": len(self._vectors),
-            "stale_reason": self.stale_reason(),
-        }
-        if active_person_ids is not None:
-            state["orphan_person_ids"] = sorted(self.orphan_person_ids(active_person_ids))
-        return state
-
-    # -- bulk / incremental writes --------------------------------------
-
-    def _insert_chunks(self, chunks: list[Chunk], start_row: int) -> None:
-        cols = ", ".join(_CHUNK_COLUMNS)
-        placeholders = ", ".join("?" for _ in _CHUNK_COLUMNS)
-        self._conn.executemany(
-            f"INSERT INTO chunks ({cols}) VALUES ({placeholders})",
-            [
+    def content_hash(self, chunks: Sequence[Chunk]) -> str:
+        h = hashlib.sha256()
+        h.update(
+            "\x1f".join(
                 (
-                    start_row + i,
-                    c.chunk_id,
-                    c.person_id,
-                    c.chunk_type,
-                    c.local_id,
-                    c.chunk_index,
-                    c.chunk_total,
-                    c.text,
+                    SCHEMA_VERSION,
+                    self.model_name,
+                    str(self.embedding_provider.dimension),
+                    self.chunk_fingerprint(),
                 )
-                for i, c in enumerate(chunks)
-            ],
+            ).encode("utf-8")
+        )
+        for c in chunks:
+            fields = (
+                c.chunk_id,
+                c.chunk_type,
+                c.local_id or "",
+                str(c.chunk_index),
+                str(c.chunk_total),
+                c.text,
+            )
+            h.update(("\x1e" + "\x1f".join(fields)).encode("utf-8"))
+        return h.hexdigest()
+
+    # -- reconcile ----------------------------------------------------------
+
+    def _stored_hashes(self, person_uuids: Iterable[Any]) -> dict[Any, str]:
+        ids = list(person_uuids)
+        if not ids:
+            return {}
+        rows = self.session.execute(
+            select(orm.SemanticPersonState.person_id, orm.SemanticPersonState.content_hash).where(
+                orm.SemanticPersonState.person_id.in_(ids)
+            )
+        ).all()
+        return {pid: h for pid, h in rows}
+
+    def _pending(self, rows: Sequence[orm.Person]) -> list[tuple[orm.Person, list[Chunk], str]]:
+        stored = self._stored_hashes(r.id for r in rows)
+        pending = []
+        for row in rows:
+            chunks = self._chunk_person(mapping.person_to_domain(row))
+            digest = self.content_hash(chunks)
+            if stored.get(row.id) != digest:
+                pending.append((row, chunks, digest))
+        return pending
+
+    def sync(self, rows: Iterable[orm.Person]) -> int:
+        """Re-embed every given person whose indexed content is stale.
+        Returns how many people were (re-)embedded. Embedding happens
+        before any write, so a provider failure leaves the index as it
+        was; a write failure rolls back only this savepoint."""
+        pending = self._pending(list(rows))
+        if not pending:
+            return 0
+        texts = [c.text for _row, chunks, _h in pending for c in chunks]
+        vectors: np.ndarray | None = (
+            np.asarray(self.embedding_provider.embed(texts), dtype="<f4") if texts else None
+        )
+        dimension = self.embedding_provider.dimension
+        person_uuids = [row.id for row, _c, _h in pending]
+        chunk_rows: list[dict[str, Any]] = []
+        state_rows: list[dict[str, Any]] = []
+        i = 0
+        for row, chunks, digest in pending:
+            for c in chunks:
+                assert vectors is not None
+                chunk_rows.append(
+                    {
+                        "workspace_id": self.workspace_id,
+                        "person_id": row.id,
+                        "chunk_id": c.chunk_id,
+                        "chunk_type": c.chunk_type,
+                        "local_id": c.local_id,
+                        "chunk_index": c.chunk_index,
+                        "chunk_total": c.chunk_total,
+                        "text": c.text,
+                        "embedding": vectors[i].tobytes(),
+                    }
+                )
+                i += 1
+            state_rows.append(
+                {
+                    "person_id": row.id,
+                    "workspace_id": self.workspace_id,
+                    "content_hash": digest,
+                    "model_name": self.model_name,
+                    "dimension": dimension,
+                    "chunk_fingerprint": self.chunk_fingerprint(),
+                    "chunk_count": len(chunks),
+                }
+            )
+        with self.session.begin_nested():
+            self._lock()
+            self.session.execute(
+                delete(orm.SemanticChunk).where(orm.SemanticChunk.person_id.in_(person_uuids))
+            )
+            self.session.execute(
+                delete(orm.SemanticPersonState).where(orm.SemanticPersonState.person_id.in_(person_uuids))
+            )
+            if chunk_rows:
+                self.session.execute(insert(orm.SemanticChunk), chunk_rows)
+            self.session.execute(insert(orm.SemanticPersonState), state_rows)
+        logger.info("semantic index: re-embedded %d people (%d chunks)", len(pending), len(chunk_rows))
+        return len(pending)
+
+    def _lock(self) -> None:
+        """Serialize index writes per workspace across processes: without
+        it, two concurrent re-embeds of one person both insert and the
+        second commit trips the (person_id, chunk_id) unique constraint."""
+        self.session.execute(
+            text("SELECT pg_advisory_xact_lock(:ns, hashtext(:ws))"),
+            {"ns": _LOCK_NAMESPACE, "ws": str(self.workspace_id)},
         )
 
-    def rebuild(self, people: Mapping[str, Person], *, content_hashes: dict[str, str] | None = None) -> None:
-        """Full rebuild from an already-validated ``{person_id: Person}`` map.
-        `content_hashes` (person_id -> canonical record hash) lets readers
-        detect drift; when omitted, person_meta rows are still written but
-        with a sentinel."""
-        content_hashes = content_hashes or {}
-        all_chunks: list[Chunk] = []
-        for person_id in sorted(people):
-            all_chunks.extend(self._chunk_person(people[person_id]))
+    def sync_workspace(self) -> int:
+        return self.sync(PeopleRepository(self.scope).list_people(archived=False))
 
-        if all_chunks:
-            matrix = np.array(self.embedding_provider.embed([c.text for c in all_chunks]), dtype="float32")
-        else:
-            matrix = np.zeros((0, self.embedding_provider.dimension), dtype="float32")
-
-        self._conn.execute("DELETE FROM chunks")
-        self._conn.execute("DELETE FROM person_meta")
-        self._insert_chunks(all_chunks, 0)
-        for person_id in people:
-            self._conn.execute(
-                "INSERT INTO person_meta (person_id, content_hash) VALUES (?, ?)",
-                (person_id, content_hashes.get(person_id, "unknown")),
+    def rebuild(self) -> int:
+        """Drop this workspace's index and re-embed every active person."""
+        with self.session.begin_nested():
+            self._lock()
+            self.session.execute(
+                delete(orm.SemanticChunk).where(orm.SemanticChunk.workspace_id == self.workspace_id)
             )
-        self._write_fingerprint_meta()
-        self._conn.commit()
-
-        self._vectors = matrix
-        self._save()
-
-    def remove_person(self, person_id: str) -> None:
-        rows = self._conn.execute("SELECT row_index FROM chunks WHERE person_id = ?", (person_id,)).fetchall()
-        self._conn.execute("DELETE FROM person_meta WHERE person_id = ?", (person_id,))
-        if not rows:
-            self._conn.commit()
-            return
-        remove_indices = {r["row_index"] for r in rows}
-        keep_mask = np.ones(len(self._vectors), dtype=bool)
-        for idx in remove_indices:
-            keep_mask[idx] = False
-        self._vectors = self._vectors[keep_mask]
-
-        self._conn.execute("DELETE FROM chunks WHERE person_id = ?", (person_id,))
-        remaining = self._conn.execute("SELECT chunk_id FROM chunks ORDER BY row_index").fetchall()
-        for new_index, row in enumerate(remaining):
-            self._conn.execute(
-                "UPDATE chunks SET row_index = ? WHERE chunk_id = ?", (new_index, row["chunk_id"])
+            self.session.execute(
+                delete(orm.SemanticPersonState).where(
+                    orm.SemanticPersonState.workspace_id == self.workspace_id
+                )
             )
-        self._conn.commit()
-        self._save()
+        return self.sync_workspace()
 
-    def upsert_person(self, person: Person, *, content_hash: str | None = None) -> None:
-        """Re-derive one person's chunks: drop the old ones, re-embed, append."""
-        self.remove_person(person.id)
-        new_chunks = self._chunk_person(person)
-        self._conn.execute(
-            "INSERT INTO person_meta (person_id, content_hash) VALUES (?, ?) "
-            "ON CONFLICT(person_id) DO UPDATE SET content_hash = excluded.content_hash",
-            (person.id, content_hash or "unknown"),
-        )
-        if not self.get_meta("schema_version"):
-            self._write_fingerprint_meta()
-        if not new_chunks:
-            self._conn.commit()
-            return
-        matrix = np.array(self.embedding_provider.embed([c.text for c in new_chunks]), dtype="float32")
-        start_row = len(self._vectors)
-        self._insert_chunks(new_chunks, start_row)
-        self._conn.commit()
-        self._vectors = np.vstack([self._vectors, matrix]) if len(self._vectors) else matrix
-        self._save()
+    # -- introspection ------------------------------------------------------
 
-    # -- search --------------------------------------------------------
+    def status(self) -> dict[str, Any]:
+        """Counts and fingerprints only -- never personal content."""
+        active = PeopleRepository(self.scope).list_people(archived=False)
+        chunk_count = self.session.execute(
+            select(func.count())
+            .select_from(orm.SemanticChunk)
+            .where(orm.SemanticChunk.workspace_id == self.workspace_id)
+        ).scalar_one()
+        indexed = self.session.execute(
+            select(func.count())
+            .select_from(orm.SemanticPersonState)
+            .join(orm.Person, orm.Person.id == orm.SemanticPersonState.person_id)
+            .where(orm.SemanticPersonState.workspace_id == self.workspace_id)
+            .where(orm.Person.archived_at.is_(None))
+        ).scalar_one()
+        return {
+            "model_name": self.model_name,
+            "dimension": self.embedding_provider.dimension,
+            "chunk_fingerprint": self.chunk_fingerprint(),
+            "active_people": len(active),
+            "indexed_people": indexed,
+            "chunks": chunk_count,
+            "stale_person_ids": sorted(row.public_id for row, _c, _h in self._pending(active)),
+        }
 
-    def _row_matches(
-        self, rows: list, scores: np.ndarray, *, limit: int, threshold: float
-    ) -> list[SemanticMatch]:
-        order = np.argsort(-scores)
+    # -- search -------------------------------------------------------------
+
+    def _rank(self, query: str, rows: Sequence[Any], *, limit: int, threshold: float) -> list[SemanticMatch]:
+        dimension = self.embedding_provider.dimension
+        usable = [r for r in rows if len(r.embedding) == dimension * 4]
+        if not usable:
+            return []
+        matrix = np.vstack([np.frombuffer(r.embedding, dtype="<f4") for r in usable])
+        query_vector: np.ndarray = np.asarray(self.embedding_provider.embed([query])[0], dtype="float32")
+        scores = _cosine_similarity(query_vector, matrix)
         matches: list[SemanticMatch] = []
-        for idx in order:
+        for idx in np.argsort(-scores):
             score = float(scores[idx])
             if score < threshold:
                 break
-            row = rows[idx]
+            r = usable[idx]
             matches.append(
                 SemanticMatch(
-                    chunk_id=row["chunk_id"],
-                    person_id=row["person_id"],
-                    chunk_type=row["chunk_type"],
-                    local_id=row["local_id"],
-                    text=row["text"],
+                    chunk_id=r.chunk_id,
+                    person_id=r.public_id,
+                    chunk_type=r.chunk_type,
+                    local_id=r.local_id,
+                    text=r.text,
                     score=score,
-                    chunk_index=row["chunk_index"],
-                    chunk_total=row["chunk_total"],
+                    chunk_index=r.chunk_index,
+                    chunk_total=r.chunk_total,
                 )
             )
             if len(matches) >= limit:
@@ -480,27 +420,32 @@ class SemanticIndex:
         return matches
 
     def search(self, query: str, *, limit: int = 5, similarity_threshold: float = 0.0) -> list[SemanticMatch]:
-        if len(self._vectors) == 0 or not query.strip():
+        """Cosine similarity across every active person in the workspace."""
+        if not query.strip():
             return []
-        query_vector = np.array(self.embedding_provider.embed([query])[0], dtype="float32")
-        scores = _cosine_similarity(query_vector, self._vectors)
-        rows = self._conn.execute("SELECT * FROM chunks ORDER BY row_index").fetchall()
-        return self._row_matches(rows, scores, limit=limit, threshold=similarity_threshold)
+        self.sync_workspace()
+        rows = self.session.execute(
+            select(*_MATCH_COLUMNS)
+            .join(orm.Person, orm.Person.id == orm.SemanticChunk.person_id)
+            .where(orm.SemanticChunk.workspace_id == self.workspace_id)
+            .where(orm.Person.archived_at.is_(None))
+        ).all()
+        return self._rank(query, rows, limit=limit, threshold=similarity_threshold)
 
     def search_person(
         self, query: str, person_id: str, *, limit: int = 25, similarity_threshold: float = 0.0
     ) -> list[SemanticMatch]:
         """Cosine similarity restricted to one person's chunks (spec: after
         person_id is resolved, retrieval never crosses people)."""
-        if len(self._vectors) == 0 or not query.strip():
+        if not query.strip():
             return []
-        rows = self._conn.execute(
-            "SELECT * FROM chunks WHERE person_id = ? ORDER BY row_index", (person_id,)
-        ).fetchall()
-        if not rows:
+        row = PeopleRepository(self.scope).get(person_id, include_archived=True)
+        if row is None:
             return []
-        row_indices = [r["row_index"] for r in rows]
-        query_vector = np.array(self.embedding_provider.embed([query])[0], dtype="float32")
-        submatrix = self._vectors[row_indices]
-        scores = _cosine_similarity(query_vector, submatrix)
-        return self._row_matches(rows, scores, limit=limit, threshold=similarity_threshold)
+        self.sync([row])
+        rows = self.session.execute(
+            select(*_MATCH_COLUMNS)
+            .join(orm.Person, orm.Person.id == orm.SemanticChunk.person_id)
+            .where(orm.SemanticChunk.person_id == row.id)
+        ).all()
+        return self._rank(query, rows, limit=limit, threshold=similarity_threshold)
